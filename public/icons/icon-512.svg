@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="gymGradBig" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fb923c" />
+      <stop offset="50%" stop-color="#ea580c" />
+      <stop offset="100%" stop-color="#7c2d12" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#gymGradBig)" />
+  <g stroke="#ffffff" stroke-width="32" stroke-linecap="round">
+    <!-- bar -->
+    <line x1="170" y1="256" x2="342" y2="256" />
+    <!-- plates -->
+    <line x1="155" y1="192" x2="155" y2="320" stroke-width="38" />
+    <line x1="112" y1="213" x2="112" y2="299" stroke-width="26" />
+    <line x1="357" y1="192" x2="357" y2="320" stroke-width="38" />
+    <line x1="400" y1="213" x2="400" y2="299" stroke-width="26" />
+  </g>
+</svg>
