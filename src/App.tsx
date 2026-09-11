@@ -11,6 +11,8 @@ import { ProgressScreen } from './screens/ProgressScreen';
 import { SetupScreen } from './screens/SetupScreen';
 import { DEFAULT_SETTINGS } from './lib/sampleData';
 import { Loader2 } from 'lucide-react';
+import { useGoogleSheetsAutoSync } from './hooks/useGoogleSheetsAutoSync';
+import { syncToGoogleSheets, updateSheetsStatus } from './lib/googleSheets';
 
 export const App: React.FC = () => {
   const [activeScreen, setActiveScreenState] = useState<ScreenType>(() => {
@@ -32,6 +34,7 @@ export const App: React.FC = () => {
 
   const [pendingRoutineId, setPendingRoutineId] = useState<string | null>(null);
   const [isDbReady, setIsDbReady] = useState(false);
+  const [isHeaderSyncing, setIsHeaderSyncing] = useState(false);
 
   // Initialize Dexie database on first launch
   useEffect(() => {
@@ -52,6 +55,52 @@ export const App: React.FC = () => {
   const settingsData = useLiveQuery(() => db.settings.get('general'), []);
 
   const settings = settingsData || DEFAULT_SETTINGS;
+
+  // Background 2x daily automated backup to Google Sheets
+  useGoogleSheetsAutoSync(
+    exercises || [],
+    routines || [],
+    routineExercises || [],
+    sessions || [],
+    sets || [],
+    settings
+  );
+
+  const handleHeaderQuickSync = async () => {
+    const config = settings.google_sheets;
+    if (!config?.enabled || !config.webAppUrl || isHeaderSyncing) return;
+
+    setIsHeaderSyncing(true);
+    try {
+      const res = await syncToGoogleSheets(
+        config.webAppUrl,
+        exercises || [],
+        routines || [],
+        routineExercises || [],
+        sessions || [],
+        sets || [],
+        settings,
+        config.secretKey
+      );
+      if (res.success) {
+        await updateSheetsStatus(settings.id, {
+          lastSyncTime: res.timestamp || new Date().toISOString(),
+          lastSyncStatus: 'success',
+          lastSyncError: undefined,
+          lastRecordCount: (sessions || []).length
+        });
+      } else {
+        await updateSheetsStatus(settings.id, {
+          lastSyncStatus: 'error',
+          lastSyncError: res.message
+        });
+      }
+    } catch (err: any) {
+      console.error('Quick sync failed:', err);
+    } finally {
+      setIsHeaderSyncing(false);
+    }
+  };
 
   const handleStartRoutine = (routineId: string) => {
     setPendingRoutineId(routineId);
@@ -79,7 +128,13 @@ export const App: React.FC = () => {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex justify-center">
       <div className="w-full max-w-md min-h-screen flex flex-col bg-slate-900 border-x border-slate-800/80 shadow-2xl relative">
         {/* Header */}
-        <Header activeScreen={activeScreen} onOpenSettings={() => setActiveScreen('setup')} />
+        <Header
+          activeScreen={activeScreen}
+          onOpenSettings={() => setActiveScreen('setup')}
+          googleSheetsConfig={settings.google_sheets}
+          onQuickSync={handleHeaderQuickSync}
+          isSyncing={isHeaderSyncing}
+        />
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto">

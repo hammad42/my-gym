@@ -2,6 +2,12 @@ import React, { useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings, MuscleGroup, Equipment } from '../types';
 import { db, clearAllLogs, resetDatabaseWithSampleData } from '../lib/db';
 import { buildBackup, isBackupPayload, downloadBackup } from '../lib/exportImport';
+import {
+  testGoogleSheetsConnection,
+  syncToGoogleSheets,
+  updateSheetsStatus,
+  GOOGLE_APPS_SCRIPT_TEMPLATE
+} from '../lib/googleSheets';
 import { selectableExercises } from '../lib/sampleData';
 import { ExerciseIcon } from '../components/ExerciseIcon';
 import {
@@ -15,7 +21,11 @@ import {
   Plus,
   AlertCircle,
   Check,
-  Dumbbell
+  Dumbbell,
+  Cloud,
+  RefreshCw,
+  Copy,
+  ExternalLink
 } from 'lucide-react';
 
 interface Props {
@@ -54,11 +64,72 @@ export const SetupScreen: React.FC<Props> = ({
   const [newEquipment, setNewEquipment] = useState<Equipment>('barbell');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Google Sheets config — edited locally, saved to settings on "Save"
+  const [sheetsUrl, setSheetsUrl] = useState(settings.google_sheets?.webAppUrl || '');
+  const [secretKey, setSecretKey] = useState(settings.google_sheets?.secretKey || '');
+  const [autoSync, setAutoSync] = useState(settings.google_sheets?.autoSyncTwiceDaily ?? true);
+  const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [showScript, setShowScript] = useState(false);
+
   const library = selectableExercises(exercises);
 
   const flash = (text: string) => {
     setMessage(text);
     setTimeout(() => setMessage(null), 2500);
+  };
+
+  const handleSaveSheetsConfig = async () => {
+    const trimmed = sheetsUrl.trim();
+    await updateSheetsStatus(
+      'general',
+      {
+        enabled: Boolean(trimmed),
+        webAppUrl: trimmed,
+        autoSyncTwiceDaily: autoSync,
+        lastSyncStatus: settings.google_sheets?.lastSyncStatus,
+        lastSyncError: settings.google_sheets?.lastSyncError
+      },
+      secretKey
+    );
+    flash('Google Sheets settings & Secret Key saved!');
+  };
+
+  const handleTestSheetsConnection = async () => {
+    if (!sheetsUrl.trim()) {
+      flash('Paste your Web App URL first.');
+      return;
+    }
+    setIsSyncingSheets(true);
+    const res = await testGoogleSheetsConnection(sheetsUrl.trim(), secretKey.trim());
+    setIsSyncingSheets(false);
+    flash(res.message);
+  };
+
+  const handleSyncNow = async () => {
+    const config = settings.google_sheets;
+    if (!config?.webAppUrl) {
+      flash('Save your Google Sheets settings first.');
+      return;
+    }
+    setIsSyncingSheets(true);
+    const res = await syncToGoogleSheets(
+      config.webAppUrl,
+      exercises,
+      routines,
+      routineExercises,
+      sessions,
+      sets,
+      settings,
+      config.secretKey
+    );
+    await updateSheetsStatus('general', {
+      lastSyncTime: res.success ? res.timestamp || new Date().toISOString() : settings.google_sheets?.lastSyncTime,
+      lastSyncStatus: res.success ? 'success' : 'error',
+      lastSyncError: res.success ? undefined : res.message,
+      lastRecordCount: res.success ? sessions.length : settings.google_sheets?.lastRecordCount
+    });
+    setIsSyncingSheets(false);
+    flash(res.message);
   };
 
   const updateSettings = async (patch: Partial<Settings>) => {
@@ -291,6 +362,126 @@ export const SetupScreen: React.FC<Props> = ({
               )}
             </div>
           ))}
+        </div>
+      </section>
+
+      {/* Google Sheets backup */}
+      <section className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-4 space-y-3">
+        <h3 className="text-sm font-bold text-white flex items-center gap-1.5">
+          <Cloud className="w-4 h-4 text-orange-400" /> Google Sheets Backup
+        </h3>
+        <p className="text-[11px] text-slate-400">
+          Automatically mirrors your workouts into a private Google Sheet you own —
+          a readable training log, session summaries, routines and a raw backup for recovery.
+        </p>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Apps Script Web App URL</label>
+          <input
+            type="url"
+            value={sheetsUrl}
+            onChange={(e) => setSheetsUrl(e.target.value)}
+            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-orange-500"
+            placeholder="https://script.google.com/macros/s/…/exec"
+          />
+        </div>
+
+        <div>
+          <label className="block text-xs font-semibold text-slate-400 mb-1">Secret Key (same as in the script)</label>
+          <input
+            type="password"
+            value={secretKey}
+            onChange={(e) => setSecretKey(e.target.value)}
+            maxLength={64}
+            className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-orange-500"
+            placeholder="Your private password (min 8 characters)"
+          />
+        </div>
+
+        <label className="flex items-center justify-between bg-slate-900/70 border border-slate-700/60 rounded-xl px-3 py-2.5 cursor-pointer">
+          <span className="text-xs text-slate-300">Auto-sync 2× daily (when app is open &amp; online)</span>
+          <input
+            type="checkbox"
+            checked={autoSync}
+            onChange={(e) => setAutoSync(e.target.checked)}
+            className="accent-orange-500 w-4 h-4"
+          />
+        </label>
+
+        <div className="grid grid-cols-3 gap-2">
+          <button
+            onClick={handleSaveSheetsConfig}
+            className="flex items-center justify-center gap-1 bg-slate-900 border border-slate-700 hover:border-orange-500/60 text-slate-200 rounded-xl py-2 text-[11px] font-bold transition"
+          >
+            <Check className="w-3.5 h-3.5" /> Save
+          </button>
+          <button
+            onClick={handleTestSheetsConnection}
+            disabled={isSyncingSheets}
+            className="flex items-center justify-center gap-1 bg-slate-900 border border-slate-700 hover:border-orange-500/60 text-slate-200 rounded-xl py-2 text-[11px] font-bold transition disabled:opacity-60"
+          >
+            Test
+          </button>
+          <button
+            onClick={handleSyncNow}
+            disabled={isSyncingSheets}
+            className="flex items-center justify-center gap-1 bg-gradient-to-tr from-orange-600 to-amber-500 text-white rounded-xl py-2 text-[11px] font-bold transition disabled:opacity-60"
+          >
+            {isSyncingSheets ? (
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              'Sync now'
+            )}
+          </button>
+        </div>
+
+        {settings.google_sheets?.enabled && settings.google_sheets?.lastSyncTime && (
+          <p
+            className={`text-[11px] px-3 py-2 rounded-xl border ${
+              settings.google_sheets.lastSyncStatus === 'error'
+                ? 'bg-rose-950/40 border-rose-800/50 text-rose-300'
+                : 'bg-emerald-950/40 border-emerald-800/50 text-emerald-300'
+            }`}
+          >
+            Last sync: {new Date(settings.google_sheets.lastSyncTime).toLocaleString()}
+            {settings.google_sheets.lastRecordCount != null &&
+              ` · ${settings.google_sheets.lastRecordCount} session(s)`}
+            {settings.google_sheets.lastSyncError && ` · ${settings.google_sheets.lastSyncError}`}
+          </p>
+        )}
+
+        <div className="border-t border-slate-700/60 pt-3">
+          <button
+            onClick={() => setShowScript(!showScript)}
+            className="flex items-center gap-1.5 text-[11px] text-orange-400 hover:text-orange-300 font-semibold"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            {showScript ? 'Hide' : 'Show'} setup instructions &amp; Apps Script code
+          </button>
+
+          {showScript && (
+            <div className="mt-3 space-y-2">
+              <ol className="text-[11px] text-slate-400 space-y-1 list-decimal list-inside">
+                <li>Create a blank Google Sheet (sheets.new).</li>
+                <li>Extensions → Apps Script → delete everything there.</li>
+                <li>Paste the code below, and change SECRET_KEY to your own password (min 8 chars).</li>
+                <li>Deploy → New deployment → type "Web app", Execute as "Me", access "Anyone".</li>
+                <li>Copy the Web App URL, paste it above with the same secret, then press Test.</li>
+              </ol>
+              <button
+                onClick={() => {
+                  navigator.clipboard?.writeText(GOOGLE_APPS_SCRIPT_TEMPLATE);
+                  flash('Apps Script copied to clipboard.');
+                }}
+                className="w-full flex items-center justify-center gap-1.5 bg-slate-900 border border-slate-700 hover:border-orange-500/60 text-slate-200 rounded-xl py-2 text-[11px] font-bold transition"
+              >
+                <Copy className="w-3.5 h-3.5" /> Copy Apps Script code
+              </button>
+              <pre className="max-h-48 overflow-auto bg-slate-950 border border-slate-800 rounded-xl p-3 text-[9px] leading-relaxed text-slate-400 whitespace-pre">
+                {GOOGLE_APPS_SCRIPT_TEMPLATE}
+              </pre>
+            </div>
+          )}
         </div>
       </section>
 

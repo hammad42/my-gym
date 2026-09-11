@@ -98,6 +98,23 @@ export interface SetLog {
 
 export type WeightUnit = 'kg' | 'lb';
 
+export interface GoogleSheetsSyncConfig {
+  enabled: boolean;
+  webAppUrl: string;
+  /**
+   * Private passphrase shared with the Apps Script. This is a credential:
+   * it is stripped from every export and from the settings embedded in the
+   * sync payload (see `sanitizeSettings`). It is only ever sent as the
+   * top-level auth field of a request.
+   */
+  secretKey?: string;
+  autoSyncTwiceDaily: boolean; // 2 times a day schedule (every 12 hours)
+  lastSyncTime?: string; // ISO string
+  lastSyncStatus?: 'success' | 'error' | 'syncing' | 'idle';
+  lastSyncError?: string;
+  lastRecordCount?: number;
+}
+
 export interface Settings {
   id: string; // 'general'
   weight_unit: WeightUnit;
@@ -105,6 +122,7 @@ export interface Settings {
   weekly_goal: number;
   /** Default rest between sets in seconds, used by the rest timer. */
   default_rest_seconds: number;
+  google_sheets?: GoogleSheetsSyncConfig;
 }
 
 /** A set resolved against its exercise, for rendering history and stats. */
