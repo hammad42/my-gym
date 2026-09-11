@@ -33,6 +33,47 @@ routines (Push/Pull/Legs) and ~6 weeks of sample sessions so charts and PRs
 have data to show. Use Settings → "Clear all logged workouts" for a clean
 start, or "Reset to demo data" to restore the seed.
 
+## Google Sheets backup
+
+Optional cloud backup that mirrors your workouts into a Google Sheet you own.
+The app keeps working fully offline; sync happens in the background when you're
+online, or on demand via the **Sheets** button in the header.
+
+Setup (one time, ~5 minutes):
+
+1. In the app: **Settings → Google Sheets Backup → Show setup instructions &
+   Apps Script code**, then press **Copy Apps Script code**.
+2. Create a blank spreadsheet at [sheets.new](https://sheets.new), open
+   **Extensions → Apps Script**, delete the placeholder code and paste the copy.
+3. Change `SECRET_KEY` in the script to your own private password (min 8
+   characters). Until you do, the webhook deliberately refuses every request.
+4. **Deploy → New deployment → Web app**, with *Execute as: Me* and
+   *Who has access: **Anyone***. Authorize, then copy the Web App URL.
+5. Back in the app: paste the URL and the same secret, **Save**, **Test**, then
+   **Sync now**.
+
+The sync writes five tabs: **Workout Log** (a readable row per set), **Sessions**
+(per-workout summary with volume and reps), **Exercises**, **Routines**, and
+`_MyGymBackup` (raw JSON for exact recovery).
+
+Two notes on the security model, both inherited from the expense-tracker this
+architecture is based on:
+
+- The webhook **fails closed**. Because the deployment is public, an unchanged
+  default password would expose your whole training history, so the script
+  refuses every request until `SECRET_KEY` is actually changed.
+- The secret is sent only as the request's top-level auth field. It is stripped
+  from the copy of the settings stored in the sheet, from JSON exports, and from
+  every other payload that leaves the device (see `src/lib/sanitize.ts`).
+
+Check a deployment from the command line without writing any data:
+
+```bash
+SHEETS_URL="https://script.google.com/macros/s/…/exec" \
+SHEETS_SECRET="your-secret" \
+node scripts/test-sheets.mjs
+```
+
 ## Architecture
 
 ```
