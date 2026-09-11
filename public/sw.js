@@ -53,6 +53,14 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Only handle requests for this origin. Third-party calls (the Google Sheets
+  // sync) must go straight to the network: caching them here is wrong, and the
+  // fallback below would answer a failed sync with a synthetic "Offline"
+  // response, hiding the real cause.
+  if (new URL(event.request.url).origin !== self.location.origin) {
+    return;
+  }
+
   // Navigation requests: network-first, and write the fresh HTML back to the
   // cache so the offline fallback tracks the deployed version instead of
   // staying pinned to whatever was cached at first install.
