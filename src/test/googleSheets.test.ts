@@ -545,3 +545,31 @@ describe('syncToGoogleSheets — protocol selection by script version', () => {
     expect(res.message).toBe('Failed to fetch');
   });
 });
+
+describe('client/script protocol contract', () => {
+  // The Apps Script lives in a template string and cannot be type-checked
+  // against the client, so these assertions guard the wire contract directly.
+  it('assembles every part kind the client emits', () => {
+    const kinds = ['meta', 'exercises', 'routines', 'routineExercises', 'sessions', 'sets'];
+    for (const kind of kinds) {
+      expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain(`case '${kind}'`);
+    }
+  });
+
+  it('uses the same part size budget as the client', () => {
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain(String(SYNC_PART_CHARS));
+  });
+
+  it('reflects the client constant in its declared script version', () => {
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain(`var SCRIPT_VERSION = ${APPS_SCRIPT_PROTOCOL_VERSION};`);
+  });
+
+  it('rejects unknown actions instead of treating them as a whole sync', () => {
+    // This guard is what makes the partitioned protocol safe to add later.
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain("Unknown action");
+  });
+
+  it('strips the secret before storing the meta part', () => {
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain("delete settings.google_sheets.secretKey");
+  });
+});

@@ -47,17 +47,36 @@ Setup (one time, ~5 minutes):
    **Extensions → Apps Script**, delete the placeholder code and paste the copy.
 3. Change `SECRET_KEY` in the script to your own private password (min 8
    characters). Until you do, the webhook deliberately refuses every request.
-4. **Deploy → New deployment → Web app**, with *Execute as: Me* and
-   *Who has access: **Anyone***. Authorize, then copy the Web App URL.
+4. **Deploy → Manage deployments**, then edit the existing deployment (pencil
+   icon) with *Version: New version*. First time only: **Deploy → New
+   deployment → Web app**, with *Execute as: Me* and *Who has access: **Anyone***.
+   Authorize, then copy the Web App URL.
 5. Back in the app: paste the URL and the same secret, **Save**, **Test**, then
    **Sync now**.
 
 The sync writes five tabs: **Workout Log** (a readable row per set), **Sessions**
 (per-workout summary with volume and reps), **Exercises**, **Routines**, and
-`_MyGymBackup` (raw JSON for exact recovery).
+`_MyGymBackup` (the raw parts used for recovery).
 
-Two notes on the security model, both inherited from the expense-tracker this
-architecture is based on:
+### Why uploads are chunked
+
+The payload is uploaded in size-bounded parts. Apps Script rejects a single POST
+body above roughly 50 KB at the network layer — the request fails with a bare
+`Failed to fetch` before the script runs — so a whole-payload sync stops working
+once the training log grows. The spreadsheet also caps a cell at 50,000
+characters, so the stored backup is spread across rows rather than living in one
+cell.
+
+The client asks the deployment for its `scriptVersion` before syncing and picks
+the protocol accordingly. A deployment still running the older script would treat
+the newer actions as a whole-payload sync and blank the sheets, so an out-of-date
+script is deliberately never sent the partitioned actions — it falls back to the
+single request and, once that no longer fits, tells you to paste the updated code.
+
+### Security model
+
+Both properties below are inherited from the expense-tracker this architecture is
+based on:
 
 - The webhook **fails closed**. Because the deployment is public, an unchanged
   default password would expose your whole training history, so the script
@@ -65,6 +84,7 @@ architecture is based on:
 - The secret is sent only as the request's top-level auth field. It is stripped
   from the copy of the settings stored in the sheet, from JSON exports, and from
   every other payload that leaves the device (see `src/lib/sanitize.ts`).
+
 
 Check a deployment from the command line without writing any data:
 
