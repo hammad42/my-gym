@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings, MuscleGroup, Equipment } from '../types';
-import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup } from '../lib/db';
-import { buildBackup, isBackupPayload, downloadBackup } from '../lib/exportImport';
+import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup, convertStoredWeights } from '../lib/db';
+import { buildBackup, isBackupPayload, downloadBackup, type BackupPayload } from '../lib/exportImport';
 import {
   testGoogleSheetsConnection,
   syncToGoogleSheets,
@@ -73,6 +73,9 @@ export const SetupScreen: React.FC<Props> = ({
   const [isRestoringSheets, setIsRestoringSheets] = useState(false);
   const [confirmRestoreSheets, setConfirmRestoreSheets] = useState(false);
   const [showScript, setShowScript] = useState(false);
+  // Unit switching rewrites stored weights, so it asks first and reports the count.
+  const [pendingUnit, setPendingUnit] = useState<'kg' | 'lb' | null>(null);
+  const [pendingImport, setPendingImport] = useState<{ name: string; payload: BackupPayload; sessions: number; sets: number } | null>(null);
 
   const library = selectableExercises(exercises);
 
@@ -182,16 +185,46 @@ export const SetupScreen: React.FC<Props> = ({
         flash('That file is not a MyGym backup.');
         return;
       }
-      // Shared with the Sheets restore path: settings are merged, not replaced,
-      // so this device's Sheets secret survives an import.
-      const counts = await restoreFromBackup(parsed);
+      // Never replace live data without showing what is about to be lost.
+      setPendingImport({
+        name: file.name,
+        payload: parsed,
+        sessions: parsed.sessions.length,
+        sets: parsed.sets.length
+      });
+    } catch (err) {
+      console.error('Import failed:', err);
+      flash('Could not read that backup file.');
+    }
+  };
+
+  const confirmImport = async () => {
+    if (!pendingImport) return;
+    try {
+      const counts = await restoreFromBackup(pendingImport.payload, settings);
+      setPendingImport(null);
       flash(
         `Backup restored: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.`
       );
     } catch (err) {
       console.error('Import failed:', err);
-      flash('Could not read that backup file.');
+      setPendingImport(null);
+      flash('The backup could not be written to this device.');
     }
+  };
+
+  /**
+   * Switching units rewrites every stored weight, because weights are
+   * dimensionless floats — relabelling them would silently turn six months of
+   * kilograms into pounds.
+   */
+  const applyUnitChange = async (unit: 'kg' | 'lb') => {
+    const counts = await convertStoredWeights(unit);
+    await updateSettings({ weight_unit: unit });
+    setPendingUnit(null);
+    flash(
+      `Switched to ${unit}. Converted ${counts.sets} set(s) and ${counts.sessions} body-weight value(s).`
+    );
   };
 
   const handleAddExercise = async () => {
@@ -245,7 +278,9 @@ export const SetupScreen: React.FC<Props> = ({
             {(['kg', 'lb'] as const).map((unit) => (
               <button
                 key={unit}
-                onClick={() => updateSettings({ weight_unit: unit })}
+                onClick={() => {
+                  if (unit !== settings.weight_unit) setPendingUnit(unit);
+                }}
                 className={`px-4 py-1.5 text-xs font-bold uppercase transition ${
                   settings.weight_unit === unit
                     ? 'bg-orange-600 text-white'
@@ -257,6 +292,31 @@ export const SetupScreen: React.FC<Props> = ({
             ))}
           </div>
         </div>
+
+        {pendingUnit && (
+          <div className="space-y-2 bg-amber-950/30 border border-amber-800/50 rounded-xl p-3">
+            <p className="flex items-start gap-1.5 text-[11px] text-amber-300">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              Weights are stored as plain numbers, so switching to {pendingUnit} rewrites
+              every logged set and body weight into {pendingUnit}. Historical charts stay
+              accurate; without this they would just be relabelled.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => applyUnitChange(pendingUnit)}
+                className="flex-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg py-2 text-[11px] font-bold transition"
+              >
+                Convert my data to {pendingUnit}
+              </button>
+              <button
+                onClick={() => setPendingUnit(null)}
+                className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg py-2 text-[11px] font-bold transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-slate-300">
@@ -576,6 +636,31 @@ export const SetupScreen: React.FC<Props> = ({
             }}
           />
         </div>
+
+        {pendingImport && (
+          <div className="space-y-2 bg-amber-950/30 border border-amber-800/50 rounded-xl p-3">
+            <p className="flex items-start gap-1.5 text-[11px] text-amber-300">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              {pendingImport.name} holds {pendingImport.sessions} session(s) and{' '}
+              {pendingImport.sets} set(s). Restoring replaces the {sessions.length} session(s)
+              on this device. Your Sheets credentials are kept.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={confirmImport}
+                className="flex-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg py-2 text-[11px] font-bold transition"
+              >
+                Replace with this backup
+              </button>
+              <button
+                onClick={() => setPendingImport(null)}
+                className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg py-2 text-[11px] font-bold transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
 
         {confirmClear ? (
           <div className="flex items-center gap-2">

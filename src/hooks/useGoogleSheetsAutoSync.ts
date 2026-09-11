@@ -8,7 +8,12 @@ export function useGoogleSheetsAutoSync(
   routineExercises: RoutineExercise[],
   sessions: WorkoutSession[],
   sets: SetLog[],
-  settings: Settings
+  settings: Settings,
+  /**
+   * When true the sync is postponed — set while a workout is being logged, so a
+   * background upload cannot interrupt the session the user is in the middle of.
+   */
+  defer = false
 ) {
   const isSyncingRef = useRef(false);
 
@@ -17,6 +22,7 @@ export function useGoogleSheetsAutoSync(
     if (!config || !config.enabled || !config.webAppUrl || !config.autoSyncTwiceDaily) {
       return;
     }
+    if (defer) return;
 
     const checkAndSync = async () => {
       // Guard against overlapping sync calls
@@ -89,6 +95,7 @@ export function useGoogleSheetsAutoSync(
     settings.google_sheets?.webAppUrl,
     settings.google_sheets?.autoSyncTwiceDaily,
     settings.google_sheets?.lastSyncTime,
+    defer,
     exercises,
     routines,
     routineExercises,

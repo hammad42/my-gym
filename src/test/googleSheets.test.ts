@@ -69,7 +69,25 @@ describe('mergeRestoredSettings', () => {
     );
     expect(merged.google_sheets?.enabled).toBe(true);
     expect(merged.google_sheets?.secretKey).toBe('super-secret-key');
-    expect(merged.weekly_goal).toBe(5);
+    // Preferences belong to the device, not to the restored data.
+    expect(merged.weekly_goal).toBe(4);
+    expect(merged.default_rest_seconds).toBe(90);
+  });
+
+  it('adopts the incoming unit, since it labels the incoming weights', () => {
+    const merged = mergeRestoredSettings(
+      { id: 'general', weight_unit: 'lb', weekly_goal: 4, default_rest_seconds: 90 },
+      SHEETS_SETTINGS
+    );
+    expect(merged.weight_unit).toBe('lb');
+  });
+
+  it('ignores a nonsense unit value', () => {
+    const merged = mergeRestoredSettings(
+      { id: 'general', weight_unit: 'stone' as never, weekly_goal: 4, default_rest_seconds: 90 },
+      SHEETS_SETTINGS
+    );
+    expect(merged.weight_unit).toBe('kg');
   });
 });
 

@@ -55,10 +55,17 @@ export function resolveSessions(
     });
 }
 
+/**
+ * Per-session totals. `totalSets` counts every logged row (a warmup is still a
+ * set you performed); `totalReps` and `totalVolume` count WORKING sets only —
+ * the same rule the PR engine and progression charts apply, so all volume
+ * numbers across the app agree.
+ */
 export function summarizeSession(resolved: ResolvedSession): SessionSummary {
   let totalReps = 0;
   let totalVolume = 0;
   for (const { set } of resolved.sets) {
+    if (set.is_warmup) continue;
     totalReps += set.reps;
     totalVolume += volumeOf(set.weight, set.reps);
   }
@@ -100,8 +107,12 @@ export function summarizeWeek(
   const sessionIdSet = new Set(thisWeek.map((s) => s.id));
   const weekSets = sets.filter((s) => sessionIdSet.has(s.session_id));
 
+  // Working sets only, matching the session summary and PR engine.
   let totalVolume = 0;
-  for (const s of weekSets) totalVolume += volumeOf(s.weight, s.reps);
+  for (const s of weekSets) {
+    if (s.is_warmup) continue;
+    totalVolume += volumeOf(s.weight, s.reps);
+  }
 
   return {
     sessionsThisWeek: thisWeek.length,
@@ -237,7 +248,7 @@ export function exerciseProgressSeries(
     .map(([date, v]) => ({ date, weight: v.weight, reps: v.reps }));
 }
 
-/** Total volume per muscle group across all logged sets — chart data. */
+/** Total volume per muscle group across all logged WORKING sets — chart data. */
 export function volumeByMuscleGroup(
   sets: SetLog[],
   exercises: Exercise[]
@@ -245,6 +256,7 @@ export function volumeByMuscleGroup(
   const exerciseById = new Map(exercises.map((e) => [e.id, e]));
   const totals = new Map<MuscleGroup, number>();
   for (const set of sets) {
+    if (set.is_warmup) continue;
     const exercise = exerciseById.get(set.exercise_id);
     if (!exercise) continue;
     totals.set(

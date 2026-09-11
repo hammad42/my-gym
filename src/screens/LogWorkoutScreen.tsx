@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings } from '../types';
 import { saveWorkout } from '../lib/db';
+import {
+  WorkoutDraft,
+  clearWorkoutDraft,
+  draftHasContent,
+  getWorkoutDraft,
+  saveWorkoutDraft
+} from '../lib/drafts';
 import { selectableExercises } from '../lib/sampleData';
 import { estimateOneRepMax } from '../types';
 import { formatWeight, formatClock, getTodayString } from '../lib/formatters';
@@ -14,7 +21,8 @@ import {
   Trash2,
   Flame,
   AlertCircle,
-  Zap
+  Zap,
+  RotateCcw
 } from 'lucide-react';
 
 interface Props {
@@ -24,6 +32,8 @@ interface Props {
   settings: Settings;
   initialRoutineId?: string | null;
   onDone: () => void;
+  /** Reports whether there is unsaved work, so navigation can warn. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 /** One exercise and its logged sets in the in-progress workout. */
@@ -32,13 +42,20 @@ interface ExerciseBlock {
   sets: { weight: string; reps: string; is_warmup: boolean }[];
 }
 
+/** Parses a non-negative number from a partially typed input, decimals intact. */
+function num(value: string): number {
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
 export const LogWorkoutScreen: React.FC<Props> = ({
   routines,
   routineExercises,
   exercises,
   settings,
   initialRoutineId = null,
-  onDone
+  onDone,
+  onDirtyChange
 }) => {
   const activeRoutines = routines.filter((r) => !r.is_archived);
   const available = selectableExercises(exercises);
@@ -54,25 +71,54 @@ export const LogWorkoutScreen: React.FC<Props> = ({
   const [error, setError] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(false);
+  const [draftReady, setDraftReady] = useState(false);
 
-  // Rest timer
+  // Rest timer. Held as an absolute deadline rather than a decrementing counter:
+  // mobile browsers throttle background timers and pause them on screen sleep,
+  // so a counter drifts or stops while a deadline always resolves correctly.
   const [restRemaining, setRestRemaining] = useState<number>(0);
+  const [restDeadline, setRestDeadline] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const deadlineRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    if (restRemaining <= 0) {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
+  const stopTimer = () => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    deadlineRef.current = null;
+    setRestDeadline(null);
+    setRestRemaining(0);
+  };
+
+  const tick = () => {
+    const deadline = deadlineRef.current;
+    if (deadline === null) return;
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    setRestRemaining(remaining);
+    if (remaining <= 0) {
+      stopTimer();
+      signalRestComplete();
+    }
+  };
+
+  const startTimerAt = (deadline: number) => {
+    deadlineRef.current = deadline;
+    setRestDeadline(deadline);
+    const remaining = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    setRestRemaining(remaining);
+    if (timerRef.current) clearInterval(timerRef.current);
+    if (remaining <= 0) {
+      deadlineRef.current = null;
       return;
     }
-    if (!timerRef.current) {
-      timerRef.current = setInterval(() => {
-        setRestRemaining((r) => r - 1);
-      }, 1000);
-    }
-  }, [restRemaining]);
+    timerRef.current = setInterval(tick, 500);
+  };
+
+  const startRestTimer = () => {
+    startTimerAt(Date.now() + settings.default_rest_seconds * 1000);
+  };
 
   useEffect(() => {
     return () => {
@@ -80,13 +126,96 @@ export const LogWorkoutScreen: React.FC<Props> = ({
     };
   }, []);
 
-  const startRestTimer = () => {
-    setRestRemaining(settings.default_rest_seconds);
+  // Restore an unfinished workout (or seed from a routine when there is none).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let draft: WorkoutDraft | undefined;
+      try {
+        draft = await getWorkoutDraft();
+      } catch {
+        draft = undefined;
+      }
+      if (cancelled) return;
+
+      if (draft && draftHasContent(draft)) {
+        setRoutineId(draft.routineId ?? '');
+        setName(draft.name);
+        setDate(draft.date);
+        setDuration(draft.duration);
+        setBodyWeight(draft.bodyWeight);
+        setNotes(draft.notes);
+        setBlocks(
+          draft.blocks.map((b) => ({
+            exercise_id: b.exercise_id,
+            sets: b.sets.map((s) => ({ ...s }))
+          }))
+        );
+        setDraftRestored(true);
+        // A rest that expired while away should not silently resume or beep.
+        if (draft.restDeadline && draft.restDeadline > Date.now()) {
+          startTimerAt(draft.restDeadline);
+        }
+      } else if (initialRoutineId) {
+        applyRoutine(initialRoutineId);
+      }
+
+      setDraftReady(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Auto-save the draft on every change so a tab switch is never data loss.
+  useEffect(() => {
+    if (!draftReady || isSuccess) return;
+    const payload = {
+      routineId: routineId || null,
+      name,
+      date,
+      duration,
+      bodyWeight,
+      notes,
+      blocks,
+      restDeadline
+    };
+    (async () => {
+      try {
+        if (draftHasContent(payload)) await saveWorkoutDraft(payload);
+        else await clearWorkoutDraft();
+      } catch {
+        // A failed draft write must never break logging.
+      }
+    })();
+  }, [draftReady, isSuccess, routineId, name, date, duration, bodyWeight, notes, blocks, restDeadline]);
+
+  // Tell the shell when there is unsaved work, so it can warn before navigating.
+  useEffect(() => {
+    if (!onDirtyChange) return;
+    const dirty =
+      !isSuccess && draftHasContent({ routineId: routineId || null, name, date, duration, bodyWeight, notes, blocks, restDeadline });
+    onDirtyChange(dirty);
+  }, [onDirtyChange, isSuccess, routineId, name, date, duration, bodyWeight, notes, blocks, restDeadline]);
+
+  const discardDraft = async () => {
+    await clearWorkoutDraft();
+    setDraftRestored(false);
+    setRoutineId('');
+    setName('');
+    setDate(getTodayString());
+    setDuration('60');
+    setBodyWeight('');
+    setNotes('');
+    setBlocks([]);
+    stopTimer();
   };
 
   // Seed the form from the chosen routine.
   const applyRoutine = (id: string | null) => {
     setRoutineId(id || '');
+    setDraftRestored(false);
     if (!id) {
       setName('');
       setBlocks([]);
@@ -111,16 +240,18 @@ export const LogWorkoutScreen: React.FC<Props> = ({
     }
   };
 
-  // Pre-fill from a "Start routine" tap on the Home screen.
+  // Pre-fill from a "Start routine" tap that arrives after mount.
   useEffect(() => {
-    if (initialRoutineId) {
+    if (initialRoutineId && draftReady && !draftRestored) {
       applyRoutine(initialRoutineId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialRoutineId]);
+  }, [initialRoutineId, draftReady]);
 
-  const parsedDuration = Math.max(1, parseInt(duration, 10) || 0);
-  const parsedBodyWeight = parseFloat(bodyWeight) || null;
+  // 0 is legitimate for a cardio-only entry; the field simply records minutes.
+  const parsedDuration = Math.min(900, Math.max(0, Math.round(num(duration))));
+  const parsedBodyWeight = num(bodyWeight) || null;
+  const today = getTodayString();
 
   const updateBlock = (blockIndex: number, patch: Partial<ExerciseBlock>) => {
     setBlocks((prev) => prev.map((b, i) => (i === blockIndex ? { ...b, ...patch } : b)));
@@ -181,7 +312,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
   const totalVolume = blocks.reduce(
     (sum, b) =>
       sum +
-      b.sets.reduce((s, set) => s + Math.max(0, parseFloat(set.weight) || 0) * Math.max(0, parseInt(set.reps, 10) || 0), 0),
+      b.sets.reduce((s, set) => (set.is_warmup ? s : s + num(set.weight) * num(set.reps)), 0),
     0
   );
   const totalSets = blocks.reduce((sum, b) => sum + b.sets.length, 0);
@@ -191,10 +322,16 @@ export const LogWorkoutScreen: React.FC<Props> = ({
 
     if (isSubmitting || isSuccess) return;
 
+    // A future date would count toward a week that has not happened yet.
+    if (date > today) {
+      setError('That date is in the future. Pick today or an earlier date.');
+      return;
+    }
+
     const filledBlocks = blocks
       .map((b) => ({
         exercise_id: b.exercise_id,
-        sets: b.sets.filter((s) => (parseFloat(s.weight) || 0) > 0 || (parseInt(s.reps, 10) || 0) > 0)
+        sets: b.sets.filter((s) => num(s.weight) > 0 || num(s.reps) > 0)
       }))
       .filter((b) => b.sets.length > 0);
 
@@ -222,8 +359,9 @@ export const LogWorkoutScreen: React.FC<Props> = ({
           id: `set-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
           exercise_id: block.exercise_id,
           set_number: 0, // rewritten below
-          weight: Math.max(0, parseFloat(s.weight) || 0),
-          reps: Math.max(0, parseInt(s.reps, 10) || 0),
+          // Round to 2dp: readable for plate math while keeping entered decimals.
+          weight: Math.round(num(s.weight) * 100) / 100,
+          reps: Math.round(num(s.reps) * 100) / 100,
           is_warmup: s.is_warmup,
           notes: ''
         });
@@ -240,8 +378,10 @@ export const LogWorkoutScreen: React.FC<Props> = ({
     setIsSubmitting(true);
     try {
       await saveWorkout(session, setRows);
+      // The workout is committed — the draft has done its job.
+      await clearWorkoutDraft().catch(() => {});
+      stopTimer();
       setIsSuccess(true);
-      if (timerRef.current) clearInterval(timerRef.current);
       setTimeout(() => onDone(), 1200);
     } catch (err) {
       console.error('Failed to save workout:', err);
@@ -249,6 +389,35 @@ export const LogWorkoutScreen: React.FC<Props> = ({
       setIsSubmitting(false);
     }
   };
+
+/** Audible + haptic cue so a finished rest is noticed from across the gym. */
+function signalRestComplete(): void {
+  try {
+    navigator.vibrate?.([200, 100, 200]);
+  } catch {
+    // Vibration unsupported (iOS Safari) — the tone still fires.
+  }
+  try {
+    const Ctor: typeof AudioContext | undefined =
+      window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return;
+    const ctx = new Ctor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = 880;
+    gain.gain.value = 0.15;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.35);
+    setTimeout(() => {
+      void ctx.close?.();
+    }, 900);
+  } catch {
+    // Audio is blocked until the first user gesture; the timer still resets.
+  }
+}
 
   if (isSuccess) {
     return (
@@ -267,6 +436,20 @@ export const LogWorkoutScreen: React.FC<Props> = ({
   return (
     <div className="pb-safe px-4 pt-4 space-y-4">
       <h2 className="text-lg font-bold text-white">Log Workout</h2>
+
+      {draftRestored && (
+        <div className="flex items-center justify-between gap-2 bg-sky-950/50 border border-sky-800/50 rounded-2xl px-3.5 py-2.5">
+          <p className="text-[11px] text-sky-200">
+            Resumed your unfinished workout — nothing was lost.
+          </p>
+          <button
+            onClick={discardDraft}
+            className="flex items-center gap-1 text-[11px] font-semibold text-sky-300/80 hover:text-sky-100 shrink-0"
+          >
+            <RotateCcw className="w-3.5 h-3.5" /> Start fresh
+          </button>
+        </div>
+      )}
 
       {/* Session meta */}
       <section className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-4 space-y-3">
@@ -289,6 +472,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
             <input
               type="date"
               value={date}
+              max={today}
               onChange={(e) => setDate(e.target.value)}
               className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white focus:outline-none focus:border-orange-500"
             />
@@ -321,7 +505,8 @@ export const LogWorkoutScreen: React.FC<Props> = ({
             <input
               type="number"
               inputMode="numeric"
-              min={1}
+              min={0}
+              max={900}
               value={duration}
               onChange={(e) => setDuration(e.target.value)}
               className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-sm text-white tnum focus:outline-none focus:border-orange-500"
@@ -366,7 +551,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
           </div>
           <p className="text-2xl font-bold text-white tnum">{formatClock(restRemaining)}</p>
           <button
-            onClick={() => setRestRemaining(0)}
+            onClick={stopTimer}
             className="text-xs text-orange-300/70 hover:text-orange-200 font-semibold"
           >
             Skip
@@ -406,8 +591,8 @@ export const LogWorkoutScreen: React.FC<Props> = ({
             </div>
 
             {block.sets.map((set, setIndex) => {
-              const weight = parseFloat(set.weight) || 0;
-              const reps = parseInt(set.reps, 10) || 0;
+              const weight = num(set.weight);
+              const reps = num(set.reps);
               const oneRm = estimateOneRepMax(weight, reps);
               return (
                 <div
@@ -430,8 +615,9 @@ export const LogWorkoutScreen: React.FC<Props> = ({
                   />
                   <input
                     type="number"
-                    inputMode="numeric"
+                    inputMode="decimal"
                     min={0}
+                    step="any"
                     value={set.reps}
                     onChange={(e) => updateSet(blockIndex, setIndex, { reps: e.target.value })}
                     className="w-16 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-center text-white tnum focus:outline-none focus:border-orange-500"

@@ -127,6 +127,7 @@ describe('LogWorkoutScreen', () => {
   beforeEach(async () => {
     await db.sessions.clear();
     await db.sets.clear();
+    await db.drafts.clear();
   });
 
   const baseProps = {
@@ -138,20 +139,22 @@ describe('LogWorkoutScreen', () => {
     onDone: () => {}
   };
 
-  it('pre-fills the plan when started from a routine', () => {
+  it('pre-fills the plan when started from a routine', async () => {
     render(<LogWorkoutScreen {...baseProps} initialRoutineId="routine-push" />);
 
-    // Push Day plans 5 exercises, each with its own set rows.
-    const selects = screen.getAllByLabelText('Exercise') as HTMLSelectElement[];
+    // Push Day plans 5 exercises, each with its own set rows. The routine is
+    // applied after the (async) draft check, so wait for the rows to appear.
+    const selects = (await screen.findAllByLabelText('Exercise')) as HTMLSelectElement[];
     expect(selects).toHaveLength(5);
     // The name input is prefilled from the routine ("Push Day" also appears as
     // an option in the routine picker, hence the plural query).
     expect(screen.getAllByDisplayValue('Push Day').length).toBeGreaterThan(0);
   });
 
-  it('seeds each exercise with its own target reps from the routine', () => {
+  it('seeds each exercise with its own target reps from the routine', async () => {
     // Pull Day: deadlift 3x5, pull-up 3x8, row 3x8, curl 3x10 -> 4 blocks, 12 rows.
     render(<LogWorkoutScreen {...baseProps} initialRoutineId="routine-pull" />);
+    await screen.findAllByLabelText('Exercise');
     expect(screen.getAllByLabelText('Exercise')).toHaveLength(4);
 
     const reps = (screen.getAllByLabelText('Reps') as HTMLInputElement[]).map((i) => i.value);
@@ -569,12 +572,51 @@ describe('SetupScreen', () => {
     settings
   });
 
-  it('changes the weight unit in the database', async () => {
+  it('changes the weight unit in the database after converting stored weights', async () => {
     render(<SetupScreen {...props()} />);
+
+    // Switching now converts data, so it asks first.
     fireEvent.click(screen.getByText('lb'));
+    expect(await screen.findByText(/Convert my data to lb/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Convert my data to lb/));
+
     await waitFor(async () => {
       expect((await db.settings.get('general'))?.weight_unit).toBe('lb');
     });
+  });
+
+  it('converts stored weights rather than just relabelling them', async () => {
+    await saveWorkout(
+      { ...session('conv', todayKey), body_weight: 80 },
+      [{ id: 's1', exercise_id: 'ex-bench', set_number: 1, weight: 100, reps: 5, is_warmup: false, notes: '' }]
+    );
+
+    render(<SetupScreen {...props()} />);
+    fireEvent.click(screen.getByText('lb'));
+    fireEvent.click(await screen.findByText(/Convert my data to lb/));
+
+    await waitFor(async () => {
+      const sets = await db.sets.toArray();
+      // 100 kg -> 220.46 lb
+      expect(sets[0].weight).toBeCloseTo(220.46, 1);
+    });
+    const stored = await db.sessions.get('conv');
+    expect(stored?.body_weight).toBeCloseTo(176.37, 1);
+    // Warmup/zero weights are left untouched.
+    expect((await db.settings.get('general'))?.weight_unit).toBe('lb');
+  });
+
+  it('cancels a unit switch without touching data', async () => {
+    await saveWorkout(session('cancel', todayKey), [
+      { id: 's1', exercise_id: 'ex-bench', set_number: 1, weight: 100, reps: 5, is_warmup: false, notes: '' }
+    ]);
+
+    render(<SetupScreen {...props()} />);
+    fireEvent.click(screen.getByText('lb'));
+    fireEvent.click(await screen.findByText('Cancel'));
+
+    expect((await db.settings.get('general'))?.weight_unit).toBe('kg');
+    expect((await db.sets.toArray())[0].weight).toBe(100);
   });
 
   it('adjusts the weekly goal within bounds', async () => {
@@ -748,10 +790,10 @@ describe('SetupScreen', () => {
       expect(storedSets).toHaveLength(1);
       expect(storedSets[0].weight).toBe(110);
 
-      // The local credential survives the restore.
+      // The local credential survives the restore, and so do device preferences.
       const settings = await db.settings.get('general');
       expect(settings?.google_sheets?.secretKey).toBe('device-secret');
-      expect(settings?.weekly_goal).toBe(5);
+      expect(settings?.weekly_goal).toBe(4);
     });
 
     it('does not wipe local data when the sheet has no backup', async () => {

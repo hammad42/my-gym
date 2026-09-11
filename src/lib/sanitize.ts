@@ -38,13 +38,28 @@ export function containsSecrets(settings: Partial<Settings> | undefined | null):
   return Boolean(settings.google_sheets?.secretKey);
 }
 
+function clamp(value: unknown, min: number, max: number, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, value));
+}
+
 /**
  * Builds the settings row to write when restoring a backup.
  *
- * The inverse of `sanitizeSettings`: a backup never contains credentials, so
- * restoring must not be allowed to delete the ones this device holds. Everything
- * that *is* backed up comes from the incoming copy; the local Sheets secret
- * always wins.
+ * The inverse of `sanitizeSettings`, and load-bearing for the same reason: a
+ * backup never contains credentials, so restoring must not be allowed to delete
+ * the ones this device holds.
+ *
+ * Field-by-field semantics:
+ *  - `google_sheets`: the device's own credential always wins; an incoming
+ *    secret is never trusted. When the incoming settings carry no sync config at
+ *    all, keep the local one rather than dropping it.
+ *  - `weight_unit`: the BACKUP wins — the unit describes the incoming weight
+ *    data, so keeping the device's label would mislabel every restored set.
+ *  - `weekly_goal` / `default_rest_seconds`: the DEVICE wins — these are
+ *    preferences of the person holding this phone, not properties of the data.
+ *    Both are clamped to their UI ranges so a hand-edited backup cannot smuggle
+ *    in a zero goal or a one-second rest timer.
  */
 export function mergeRestoredSettings(
   incoming: Partial<Settings> | undefined,
@@ -62,6 +77,13 @@ export function mergeRestoredSettings(
   merged.google_sheets = incoming?.google_sheets
     ? { ...incoming.google_sheets, secretKey: current.google_sheets?.secretKey }
     : current.google_sheets;
+
+  // The unit travels with the data; the preferences travel with the device.
+  merged.weight_unit = incoming?.weight_unit === 'lb' || incoming?.weight_unit === 'kg'
+    ? incoming.weight_unit
+    : current.weight_unit;
+  merged.weekly_goal = clamp(current.weekly_goal, 1, 14, 4);
+  merged.default_rest_seconds = clamp(current.default_rest_seconds, 15, 600, 90);
 
   return merged;
 }

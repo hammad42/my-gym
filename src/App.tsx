@@ -10,7 +10,7 @@ import { RoutinesScreen } from './screens/RoutinesScreen';
 import { ProgressScreen } from './screens/ProgressScreen';
 import { SetupScreen } from './screens/SetupScreen';
 import { DEFAULT_SETTINGS } from './lib/sampleData';
-import { Loader2 } from 'lucide-react';
+import { Loader2, AlertTriangle } from 'lucide-react';
 import { useGoogleSheetsAutoSync } from './hooks/useGoogleSheetsAutoSync';
 import { syncToGoogleSheets, updateSheetsStatus } from './lib/googleSheets';
 
@@ -35,6 +35,8 @@ export const App: React.FC = () => {
   const [pendingRoutineId, setPendingRoutineId] = useState<string | null>(null);
   const [isDbReady, setIsDbReady] = useState(false);
   const [isHeaderSyncing, setIsHeaderSyncing] = useState(false);
+  const [storageFailed, setStorageFailed] = useState(false);
+  const [logDirty, setLogDirty] = useState(false);
 
   // Initialize Dexie database on first launch
   useEffect(() => {
@@ -42,6 +44,9 @@ export const App: React.FC = () => {
       .then(() => setIsDbReady(true))
       .catch((err) => {
         console.error('Failed to initialize database:', err);
+        // Private browsing / disabled storage: the app still renders, but every
+        // write silently fails, so say so instead of pretending to save.
+        setStorageFailed(true);
         setIsDbReady(true);
       });
   }, []);
@@ -56,14 +61,16 @@ export const App: React.FC = () => {
 
   const settings = settingsData || DEFAULT_SETTINGS;
 
-  // Background 2x daily automated backup to Google Sheets
+  // Background 2x daily automated backup to Google Sheets. Deferred while a
+  // workout is being logged so a sync cannot fire mid-session.
   useGoogleSheetsAutoSync(
     exercises || [],
     routines || [],
     routineExercises || [],
     sessions || [],
     sets || [],
-    settings
+    settings,
+    activeScreen === 'add'
   );
 
   const handleHeaderQuickSync = async () => {
@@ -112,6 +119,21 @@ export const App: React.FC = () => {
     setActiveScreen('add');
   };
 
+  /**
+   * Navigating away mid-workout is safe — the draft is in IndexedDB — but the
+   * user should know that, so an accidental tap is not a scare.
+   */
+  const navigateWithGuard = (screen: ScreenType) => {
+    if (logDirty && activeScreen === 'add' && screen !== 'add') {
+      const proceed = window.confirm(
+        'Leave this workout? Your progress is saved as a draft and you can resume it from the Log tab.'
+      );
+      if (!proceed) return;
+    }
+    if (screen === 'add') setPendingRoutineId(null);
+    setActiveScreen(screen);
+  };
+
   if (!isDbReady || !exercises || !routines || !routineExercises || !sessions || !sets) {
     return (
       <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
@@ -130,11 +152,21 @@ export const App: React.FC = () => {
         {/* Header */}
         <Header
           activeScreen={activeScreen}
-          onOpenSettings={() => setActiveScreen('setup')}
+          onOpenSettings={() => navigateWithGuard('setup')}
           googleSheetsConfig={settings.google_sheets}
           onQuickSync={handleHeaderQuickSync}
           isSyncing={isHeaderSyncing}
         />
+
+        {storageFailed && (
+          <div className="mx-4 mt-3 flex items-start gap-2 bg-rose-950/50 border border-rose-800/60 rounded-2xl px-3.5 py-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            <p className="text-[11px] text-rose-200">
+              Local storage is unavailable — this browser is probably in private mode. Workouts
+              cannot be saved on this device.
+            </p>
+          </div>
+        )}
 
         {/* Main Content Area */}
         <main className="flex-1 overflow-y-auto">
@@ -158,7 +190,12 @@ export const App: React.FC = () => {
               exercises={exercises}
               settings={settings}
               initialRoutineId={pendingRoutineId}
-              onDone={() => setActiveScreen('home')}
+              onDirtyChange={setLogDirty}
+              onDone={() => {
+                setPendingRoutineId(null);
+                setLogDirty(false);
+                setActiveScreen('home');
+              }}
             />
           )}
 
@@ -203,15 +240,7 @@ export const App: React.FC = () => {
         </main>
 
         {/* Fixed Mobile Bottom Navigation */}
-        <BottomNav
-          activeScreen={activeScreen}
-          onChangeScreen={(screen) => {
-            if (screen === 'add') {
-              setPendingRoutineId(null);
-            }
-            setActiveScreen(screen);
-          }}
-        />
+        <BottomNav activeScreen={activeScreen} onChangeScreen={navigateWithGuard} />
       </div>
     </div>
   );

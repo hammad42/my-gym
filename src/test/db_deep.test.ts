@@ -262,9 +262,41 @@ describe('restoreFromBackup — "load data from sheet" path (deep)', () => {
 
     const settings = await db.settings.get('general');
     expect(settings?.google_sheets?.secretKey).toBe('the-device-secret');
-    // Non-secret values from the backup are honoured.
-    expect(settings?.weekly_goal).toBe(6);
-    expect(settings?.default_rest_seconds).toBe(120);
+    // The unit travels with the data, so the backup's value is adopted...
+    expect(settings?.weight_unit).toBe('kg');
+    // ...but goals and the rest timer are this device's preferences, not
+    // properties of the restored data, so they are left alone.
+    expect(settings?.weekly_goal).toBe(4);
+    expect(settings?.default_rest_seconds).toBe(90);
+  });
+
+  it('adopts the backup unit because it describes the incoming weights', async () => {
+    await db.settings.update('general', { weight_unit: 'kg' });
+    await restoreFromBackup({
+      exercises: DEFAULT_EXERCISES,
+      sessions: [],
+      sets: [],
+      settings: {
+        id: 'general',
+        weight_unit: 'lb',
+        weekly_goal: 4,
+        default_rest_seconds: 90
+      }
+    });
+    expect((await db.settings.get('general'))?.weight_unit).toBe('lb');
+  });
+
+  it('clamps absurd preferences from a hand-edited backup', async () => {
+    await db.settings.update('general', { weekly_goal: 4, default_rest_seconds: 90 });
+    await restoreFromBackup({
+      exercises: DEFAULT_EXERCISES,
+      sessions: [],
+      sets: [],
+      settings: { id: 'general', weight_unit: 'kg', weekly_goal: 0, default_rest_seconds: 1 }
+    });
+    const settings = await db.settings.get('general');
+    expect(settings?.weekly_goal).toBe(4); // device value, never zero
+    expect(settings?.default_rest_seconds).toBe(90);
   });
 
   it('survives a full export -> restore round trip losslessly', async () => {

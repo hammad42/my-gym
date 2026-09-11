@@ -8,6 +8,9 @@ import {
   generateSampleSessions
 } from './sampleData';
 import { mergeRestoredSettings } from './sanitize';
+// Type-only: erased at build time, so this does not create a runtime cycle with
+// drafts.ts, which imports `db` from here.
+import type { WorkoutDraft } from './drafts';
 
 export class GymDatabase extends Dexie {
   exercises!: Table<Exercise, string>;
@@ -16,6 +19,7 @@ export class GymDatabase extends Dexie {
   sessions!: Table<WorkoutSession, string>;
   sets!: Table<SetLog, string>;
   settings!: Table<Settings, string>;
+  drafts!: Table<WorkoutDraft, string>;
 
   constructor() {
     super('GymDatabase');
@@ -27,6 +31,12 @@ export class GymDatabase extends Dexie {
       sessions: 'id, date, routine_id, created_at',
       sets: 'id, session_id, exercise_id, set_number, created_at',
       settings: 'id'
+    });
+
+    // v2: in-progress workout drafts, so a tab switch mid-workout is no longer
+    // data loss. Additive — existing installs upgrade in place.
+    this.version(2).stores({
+      drafts: 'id, updatedAt'
     });
 
     this.on('populate', () => {
@@ -209,6 +219,45 @@ export async function deleteSession(sessionId: string): Promise<void> {
     await db.sets.where('session_id').equals(sessionId).delete();
     await db.sessions.delete(sessionId);
   });
+}
+
+export const LB_PER_KG = 2.2046226218;
+
+/**
+ * Rewrites every stored weight into the target unit, in one transaction.
+ *
+ * Weights are dimensionless floats in the database, so "switching units" in the
+ * settings would silently relabel six months of kilograms as pounds. The only
+ * correct move is to convert the data itself, which is why the settings screen
+ * asks for confirmation first and reports what it changed.
+ *
+ * Rounding to 2 decimals keeps plate math readable; a kg -> lb -> kg round trip
+ * stays within 0.01 of the original.
+ */
+export async function convertStoredWeights(target: 'kg' | 'lb'): Promise<{ sets: number; sessions: number }> {
+  const factor = target === 'lb' ? LB_PER_KG : 1 / LB_PER_KG;
+  let setCount = 0;
+  let sessionCount = 0;
+
+  await db.transaction('rw', [db.sets, db.sessions], async () => {
+    await db.sets
+      .filter((s) => s.weight > 0)
+      .modify((s) => {
+        s.weight = Math.round(s.weight * factor * 100) / 100;
+        setCount++;
+      });
+
+    await db.sessions
+      .filter((s) => (s.body_weight ?? 0) > 0)
+      .modify((s) => {
+        if (s.body_weight != null) {
+          s.body_weight = Math.round(s.body_weight * factor * 100) / 100;
+          sessionCount++;
+        }
+      });
+  });
+
+  return { sets: setCount, sessions: sessionCount };
 }
 
 /** Save a full workout: one session row plus its set rows, atomically. */
