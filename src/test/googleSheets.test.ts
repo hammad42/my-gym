@@ -235,6 +235,26 @@ function mockFetchSequence(responses: any[]) {
   const calls: any[] = [];
   let i = 0;
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, init: any) => {
+    // The version probe is a GET and carries no body.
+    if (!init || !init.body) {
+      return new Response(JSON.stringify({ status: 'success', scriptVersion: 2 }), { status: 200 });
+    }
+    calls.push(JSON.parse(init.body));
+    const body = responses[Math.min(i, responses.length - 1)];
+    i++;
+    return new Response(JSON.stringify(body), { status: 200 });
+  });
+  return calls;
+}
+
+/** Same, but the deployment reports a specific protocol version on ping. */
+function mockFetchAtVersion(scriptVersion: number, responses: any[]) {
+  const calls: any[] = [];
+  let i = 0;
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, init: any) => {
+    if (!init || !init.body) {
+      return new Response(JSON.stringify({ status: 'success', scriptVersion }), { status: 200 });
+    }
     calls.push(JSON.parse(init.body));
     const body = responses[Math.min(i, responses.length - 1)];
     i++;
@@ -454,50 +474,73 @@ describe('GOOGLE_APPS_SCRIPT_TEMPLATE', () => {
   });
 });
 
-describe('syncToGoogleSheets — legacy v1 deployment fallback', () => {
+describe('syncToGoogleSheets — protocol selection by script version', () => {
   const URL_OK = 'https://script.google.com/macros/s/abc/exec';
 
-  it('falls back to the single-shot upload when the script does not know sync-start', async () => {
-    const calls = mockFetchSequence([
-      { status: 'error', message: 'Unknown action: sync-start' },
-      { status: 'success', message: 'Backup saved successfully!', counts: { sessions: 2, sets: 3, exercises: 2 } }
-    ]);
+  it('NEVER sends partitioned actions to a v1 deployment (it would write empty sheets)', async () => {
+    const calls = mockFetchAtVersion(1, [{ status: 'success', message: 'Backup saved!' }]);
 
     const res = await syncToGoogleSheets(
       URL_OK, ALL_EXERCISES, ALL_ROUTINES, ALL_ROUTINE_EXERCISES, ALL_SESSIONS, ALL_SETS, SHEETS_SETTINGS, 'k'
     );
 
     expect(res.success).toBe(true);
-    expect(calls.map((c) => c.action)).toEqual(['sync-start', 'sync']);
+    const actions = calls.map((c) => c.action);
+    expect(actions).toEqual(['sync']);
+    expect(actions).not.toContain('sync-start');
+    expect(actions).not.toContain('sync-part');
+    expect(actions).not.toContain('sync-commit');
     // The legacy request still carries the whole dataset.
-    expect(calls[1].sets).toHaveLength(3);
-    expect(calls[1].sessions).toHaveLength(2);
-    expect(calls[1].settings.google_sheets?.secretKey).toBeUndefined();
+    expect(calls[0].sets).toHaveLength(3);
+    expect(calls[0].settings.google_sheets?.secretKey).toBeUndefined();
   });
 
-  it('falls back when a later action is unknown too', async () => {
-    const calls = mockFetchSequence([
-      { status: 'success' },
-      { status: 'error', message: 'Unknown action: sync-part' },
-      { status: 'success', message: 'Backup saved!' }
-    ]);
+  it('treats an undetectable version as legacy rather than risking a wipe', async () => {
+    const calls: any[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, init: any) => {
+      if (!init || !init.body) return new Response('nope', { status: 500 });
+      calls.push(JSON.parse(init.body));
+      return new Response(JSON.stringify({ status: 'success', message: 'Backup saved!' }), { status: 200 });
+    });
 
     const res = await syncToGoogleSheets(URL_OK, ALL_EXERCISES, [], [], ALL_SESSIONS, ALL_SETS, SHEETS_SETTINGS, 'k');
     expect(res.success).toBe(true);
-    expect(calls[calls.length - 1].action).toBe('sync');
+    expect(calls.map((c) => c.action)).toEqual(['sync']);
+  });
+
+  it('uses the partitioned protocol on a v2 deployment', async () => {
+    const calls = mockFetchAtVersion(2, [{ status: 'success' }, { status: 'success' }]);
+    await syncToGoogleSheets(URL_OK, ALL_EXERCISES, [], [], ALL_SESSIONS, ALL_SETS, SHEETS_SETTINGS, 'k');
+
+    const actions = calls.map((c) => c.action);
+    expect(actions[0]).toBe('sync-start');
+    expect(actions).toContain('sync-part');
+    expect(actions[actions.length - 1]).toBe('sync-commit');
   });
 
   it('tells the user to update the script when a legacy upload exceeds the POST limit', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+    const calls: any[] = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, init: any) => {
+      if (!init || !init.body) {
+        return new Response(JSON.stringify({ status: 'success', scriptVersion: 1 }), { status: 200 });
+      }
+      calls.push(JSON.parse(init.body));
+      throw new TypeError('Failed to fetch');
+    });
 
     const res = await syncToGoogleSheets(URL_OK, ALL_EXERCISES, [], [], ALL_SESSIONS, ALL_SETS, SHEETS_SETTINGS, 'k');
     expect(res.success).toBe(false);
     expect(res.message).toMatch(/Failed to fetch/);
-    expect(res.message).toMatch(/older Apps Script/);
+    expect(res.message).toMatch(/latest Apps Script/);
   });
 
   it('does not nag about the script for an empty workout log', async () => {
-    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url: any, init: any) => {
+      if (!init || !init.body) {
+        return new Response(JSON.stringify({ status: 'success', scriptVersion: 1 }), { status: 200 });
+      }
+      throw new TypeError('Failed to fetch');
+    });
     const res = await syncToGoogleSheets(URL_OK, ALL_EXERCISES, [], [], [], [], SHEETS_SETTINGS, 'k');
     expect(res.message).toBe('Failed to fetch');
   });

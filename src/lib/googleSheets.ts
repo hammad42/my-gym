@@ -767,9 +767,35 @@ export async function testGoogleSheetsConnection(
 }
 
 /**
- * Single-request upload, used as a fallback for deployments still running the
- * v1 script. It works only while the payload fits in one POST (roughly 50 KB);
- * beyond that Apps Script rejects the request and the error is reported.
+ * Asks the deployed script which protocol version it speaks, without sending the
+ * key or receiving any data.
+ *
+ * This must happen BEFORE choosing an upload protocol. A v1 deployment has no
+ * unknown-action guard: it treats any POST as a whole-sync request, so sending
+ * it `sync-start` (which carries no data) would make it clear the sheets and
+ * write nothing, then report success — a silent wipe. Returns 0 when the version
+ * cannot be determined, which is treated as "legacy".
+ */
+export async function detectScriptVersion(webAppUrl: string): Promise<number> {
+  if (!isValidScriptUrl(webAppUrl)) return 0;
+
+  try {
+    const base = webAppUrl.trim();
+    const pingUrl = `${base}${base.includes('?') ? '&' : '?'}action=ping&_t=${Date.now()}`;
+    const response = await fetch(pingUrl, { method: 'GET' });
+    if (!response.ok) return 0;
+    const res = await response.json();
+    const version = Number(res?.scriptVersion);
+    return Number.isFinite(version) && version > 0 ? version : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Single-request upload, used for deployments running the v1 script. It works
+ * only while the payload fits in one POST (roughly 50 KB); beyond that Apps
+ * Script rejects the request and the user is told to update the script.
  */
 async function syncWholePayloadToScript(
   webAppUrl: string,
@@ -809,10 +835,10 @@ async function syncWholePayloadToScript(
  *
  * The payload is uploaded as size-bounded parts (start / part… / commit), because
  * Apps Script rejects a POST body above roughly 50 KB before the script runs.
- * A deployment still running the older v1 script does not know those actions, so
- * the request falls back to the legacy single-shot upload — which keeps working
- * until the log grows past the POST limit, at which point the user is told to
- * update the script.
+ *
+ * The protocol is chosen from the deployed script's reported version, never by
+ * trial and error: sending partitioned actions to a v1 deployment would make it
+ * write empty sheets and report success.
  */
 export async function syncToGoogleSheets(
   webAppUrl: string,
@@ -830,19 +856,25 @@ export async function syncToGoogleSheets(
 
   const key = secretKey?.trim() || undefined;
   const parts = buildSyncParts(exercises, routines, routineExercises, sessions, sets, settings);
-  const syncId = `sync-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
   const UPDATE_HINT =
-    ' This deployment is running an older Apps Script. Open MyGym > Settings > Google Sheets Backup, copy the updated code, and paste it into Apps Script (Deploy > Manage deployments > New version).';
-  const isUnknownAction = (message?: string) => /unknown action/i.test(message || '');
+    ' If you have not yet pasted the latest Apps Script from MyGym > Settings > Google Sheets Backup, do that (Deploy > Manage deployments > New version) and sync again.';
+
+  // Decide the protocol up front.
+  const scriptVersion = await detectScriptVersion(webAppUrl);
+  if (scriptVersion < APPS_SCRIPT_PROTOCOL_VERSION) {
+    const legacy = await syncWholePayloadToScript(webAppUrl, parts, key);
+    if (!legacy.success && /failed to fetch/i.test(legacy.message) && sets.length > 0) {
+      return { success: false, message: legacy.message + UPDATE_HINT };
+    }
+    return legacy;
+  }
+
+  const syncId = `sync-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
 
   try {
     const start = await postToScript(webAppUrl, { action: 'sync-start', secretKey: key, syncId, partCount: parts.length });
-
     if (start.status !== 'success') {
-      if (isUnknownAction(start.message)) {
-        return await syncWholePayloadToScript(webAppUrl, parts, key);
-      }
       return { success: false, message: start.message || 'Could not start the sync.' };
     }
 
@@ -855,9 +887,6 @@ export async function syncToGoogleSheets(
         part: parts[index]
       });
       if (res.status !== 'success') {
-        if (isUnknownAction(res.message)) {
-          return await syncWholePayloadToScript(webAppUrl, parts, key);
-        }
         return { success: false, message: res.message || `Could not upload part ${index + 1} of ${parts.length}.` };
       }
     }
@@ -869,9 +898,6 @@ export async function syncToGoogleSheets(
       partCount: parts.length
     });
     if (commit.status !== 'success') {
-      if (isUnknownAction(commit.message)) {
-        return await syncWholePayloadToScript(webAppUrl, parts, key);
-      }
       return { success: false, message: commit.message || 'Could not finalise the sync.' };
     }
 
@@ -883,9 +909,7 @@ export async function syncToGoogleSheets(
     };
   } catch (err: any) {
     const message = err.message || 'Network error while connecting to Google Sheets.';
-    // A bare fetch failure on a v1 deployment means the single request exceeded
-    // the POST limit — the one case where updating the script is required.
-    if (/failed to fetch/i.test(message) && sets.length > 0) {
+    if (/failed to fetch/i.test(message)) {
       return { success: false, message: message + UPDATE_HINT };
     }
     return { success: false, message };
