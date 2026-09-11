@@ -7,6 +7,7 @@ import {
   DEFAULT_SETTINGS,
   generateSampleSessions
 } from './sampleData';
+import { mergeRestoredSettings } from './sanitize';
 
 export class GymDatabase extends Dexie {
   exercises!: Table<Exercise, string>;
@@ -82,9 +83,90 @@ export async function initializeDatabase(): Promise<void> {
 }
 
 /**
- * Reset and reload initial sample data
+ * Shape accepted from any backup source (JSON file or Google Sheets). Tables the
+ * payload omits fall back to an empty list rather than leaving stale local rows.
+ */
+export interface RestorableData {
+  exercises?: Exercise[];
+  routines?: Routine[];
+  routine_exercises?: RoutineExercise[];
+  sessions?: WorkoutSession[];
+  sets?: SetLog[];
+  settings?: Settings;
+}
+
+export interface RestoreReport {
+  exercises: number;
+  routines: number;
+  sessions: number;
+  sets: number;
+}
+
+/**
+ * Replaces the local database with a backup, atomically.
+ *
+ * Settings are merged rather than overwritten: a backup is always sanitized, so
+ * the incoming copy carries no Sheets secret, and writing it verbatim would
+ * silently kill the scheduled backup. `mergeRestoredSettings` keeps this
+ * device's own credential (see lib/sanitize.ts).
+ *
+ * `localSettings` lets the caller supply the authoritative current row. The UI
+ * holds the live settings it is rendering, and passing them in keeps the
+ * credential guarantee true even if the stored row is momentarily behind it.
+ */
+export async function restoreFromBackup(
+  data: RestorableData,
+  localSettings?: Settings
+): Promise<RestoreReport> {
+  // A restore that leaves no exercise library would silently break logging and
+  // history rendering, so an empty list falls back to the shipped defaults.
+  const exercises = data.exercises && data.exercises.length > 0 ? data.exercises : DEFAULT_EXERCISES;
+  const routines = data.routines ?? [];
+  const routineExercises = data.routine_exercises ?? [];
+  const sessions = data.sessions ?? [];
+  const sets = data.sets ?? [];
+
+  const currentSettings = localSettings ?? (await db.settings.get('general')) ?? DEFAULT_SETTINGS;
+  const nextSettings = mergeRestoredSettings(data.settings, currentSettings);
+
+  await db.transaction(
+    'rw',
+    [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings],
+    async () => {
+      await db.exercises.clear();
+      await db.routines.clear();
+      await db.routine_exercises.clear();
+      await db.sessions.clear();
+      await db.sets.clear();
+
+      if (exercises.length > 0) await db.exercises.bulkAdd(exercises);
+      if (routines.length > 0) await db.routines.bulkAdd(routines);
+      if (routineExercises.length > 0) await db.routine_exercises.bulkAdd(routineExercises);
+      if (sessions.length > 0) await db.sessions.bulkAdd(sessions);
+      if (sets.length > 0) await db.sets.bulkAdd(sets);
+
+      await db.settings.put(nextSettings);
+    }
+  );
+
+  return {
+    exercises: exercises.length,
+    routines: routines.length,
+    sessions: sessions.length,
+    sets: sets.length
+  };
+}
+
+/**
+ * Reset and reload initial sample data.
+ *
+ * Preferences go back to defaults, but the Google Sheets sync configuration is
+ * preserved — including its secret key. Wiping it here would silently disable
+ * the backup the user had already set up, with no warning that it happened.
  */
 export async function resetDatabaseWithSampleData(): Promise<void> {
+  const existing = await db.settings.get('general');
+
   await db.transaction(
     'rw',
     [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings],
@@ -99,7 +181,10 @@ export async function resetDatabaseWithSampleData(): Promise<void> {
       await db.exercises.bulkAdd(DEFAULT_EXERCISES);
       await db.routines.bulkAdd(DEFAULT_ROUTINES);
       await db.routine_exercises.bulkAdd(DEFAULT_ROUTINE_EXERCISES);
-      await db.settings.put(DEFAULT_SETTINGS);
+      await db.settings.put({
+        ...DEFAULT_SETTINGS,
+        ...(existing?.google_sheets ? { google_sheets: existing.google_sheets } : {})
+      });
       const { sessions, sets } = generateSampleSessions();
       await db.sessions.bulkAdd(sessions);
       await db.sets.bulkAdd(sets);

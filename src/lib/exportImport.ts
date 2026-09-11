@@ -1,4 +1,5 @@
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings } from '../types';
+import { sanitizeSettings } from './sanitize';
 
 export interface BackupPayload {
   app: 'mygym';
@@ -12,6 +13,14 @@ export interface BackupPayload {
   settings: Settings;
 }
 
+/**
+ * Builds the downloadable backup.
+ *
+ * Settings are sanitized first: an exported file is something people email to
+ * themselves or drop in cloud storage, so the Sheets secret key must not ride
+ * along in it. The sync destination and status are preserved so a restore still
+ * knows where to sync.
+ */
 export function buildBackup(
   exercises: Exercise[],
   routines: Routine[],
@@ -29,7 +38,7 @@ export function buildBackup(
     routine_exercises: routineExercises,
     sessions,
     sets,
-    settings
+    settings: sanitizeSettings(settings)
   };
 }
 

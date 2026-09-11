@@ -1,10 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings, MuscleGroup, Equipment } from '../types';
-import { db, clearAllLogs, resetDatabaseWithSampleData } from '../lib/db';
+import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup } from '../lib/db';
 import { buildBackup, isBackupPayload, downloadBackup } from '../lib/exportImport';
 import {
   testGoogleSheetsConnection,
   syncToGoogleSheets,
+  fetchFromGoogleSheets,
   updateSheetsStatus,
   GOOGLE_APPS_SCRIPT_TEMPLATE
 } from '../lib/googleSheets';
@@ -69,6 +70,8 @@ export const SetupScreen: React.FC<Props> = ({
   const [secretKey, setSecretKey] = useState(settings.google_sheets?.secretKey || '');
   const [autoSync, setAutoSync] = useState(settings.google_sheets?.autoSyncTwiceDaily ?? true);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
+  const [isRestoringSheets, setIsRestoringSheets] = useState(false);
+  const [confirmRestoreSheets, setConfirmRestoreSheets] = useState(false);
   const [showScript, setShowScript] = useState(false);
 
   const library = selectableExercises(exercises);
@@ -132,6 +135,37 @@ export const SetupScreen: React.FC<Props> = ({
     flash(res.message);
   };
 
+  const handleRestoreFromSheets = async () => {
+    const config = settings.google_sheets;
+    if (!config?.webAppUrl) {
+      flash('Save your Google Sheets settings first.');
+      return;
+    }
+    setIsRestoringSheets(true);
+    const res = await fetchFromGoogleSheets(config.webAppUrl, config.secretKey);
+    if (!res.success || !res.data) {
+      setIsRestoringSheets(false);
+      setConfirmRestoreSheets(false);
+      flash(res.message || 'Could not load a backup from Google Sheets.');
+      return;
+    }
+    try {
+      // Pass the live settings row so the Sheets credential is preserved even
+      // if the stored row lags behind what is on screen.
+      const counts = await restoreFromBackup(res.data, settings);
+      setIsRestoringSheets(false);
+      setConfirmRestoreSheets(false);
+      flash(
+        `Restored from sheet: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.`
+      );
+    } catch (err) {
+      console.error('Restore from Sheets failed:', err);
+      setIsRestoringSheets(false);
+      setConfirmRestoreSheets(false);
+      flash('The sheet backup could not be written to this device.');
+    }
+  };
+
   const updateSettings = async (patch: Partial<Settings>) => {
     await db.settings.update('general', patch);
   };
@@ -148,26 +182,12 @@ export const SetupScreen: React.FC<Props> = ({
         flash('That file is not a MyGym backup.');
         return;
       }
-      await db.transaction(
-        'rw',
-        [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings],
-        async () => {
-          await db.exercises.clear();
-          await db.routines.clear();
-          await db.routine_exercises.clear();
-          await db.sessions.clear();
-          await db.sets.clear();
-          await db.settings.clear();
-
-          await db.exercises.bulkAdd(parsed.exercises);
-          await db.routines.bulkAdd(parsed.routines);
-          await db.routine_exercises.bulkAdd(parsed.routine_exercises || []);
-          await db.sessions.bulkAdd(parsed.sessions);
-          await db.sets.bulkAdd(parsed.sets);
-          await db.settings.put(parsed.settings);
-        }
+      // Shared with the Sheets restore path: settings are merged, not replaced,
+      // so this device's Sheets secret survives an import.
+      const counts = await restoreFromBackup(parsed);
+      flash(
+        `Backup restored: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.`
       );
-      flash('Backup restored.');
     } catch (err) {
       console.error('Import failed:', err);
       flash('Could not read that backup file.');
@@ -448,6 +468,44 @@ export const SetupScreen: React.FC<Props> = ({
               ` · ${settings.google_sheets.lastRecordCount} session(s)`}
             {settings.google_sheets.lastSyncError && ` · ${settings.google_sheets.lastSyncError}`}
           </p>
+        )}
+
+        {/* Load data back down from the sheet */}
+        {settings.google_sheets?.webAppUrl && (
+          <div className="border-t border-slate-700/60 pt-3 space-y-2">
+            {confirmRestoreSheets ? (
+              <>
+                <p className="flex items-start gap-1.5 text-[11px] text-amber-400">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  This replaces everything on this device with the sheet's backup
+                  ({sessions.length} sessions currently stored here). Your Sheets
+                  credentials are kept.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRestoreFromSheets}
+                    disabled={isRestoringSheets}
+                    className="flex-1 bg-amber-600 hover:bg-amber-500 text-white rounded-xl py-2 text-[11px] font-bold transition disabled:opacity-60"
+                  >
+                    {isRestoringSheets ? 'Loading…' : 'Yes, load from sheet'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmRestoreSheets(false)}
+                    className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl py-2 text-[11px] font-bold transition"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <button
+                onClick={() => setConfirmRestoreSheets(true)}
+                className="w-full flex items-center justify-center gap-1.5 bg-slate-900 border border-slate-700 hover:border-orange-500/60 text-slate-200 rounded-xl py-2.5 text-[11px] font-bold transition"
+              >
+                <Download className="w-3.5 h-3.5" /> Load data from sheet (restore)
+              </button>
+            )}
+          </div>
         )}
 
         <div className="border-t border-slate-700/60 pt-3">

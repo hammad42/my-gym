@@ -181,6 +181,7 @@ export const RoutineEditor: React.FC<Props> = ({ routine, exercises, lines, onDo
               <select
                 value={line.exercise_id}
                 onChange={(e) => updateLine(index, { exercise_id: e.target.value })}
+                aria-label="Exercise"
                 className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-xl px-2 py-2 text-sm text-white focus:outline-none focus:border-orange-500"
               >
                 {exercise && !availableIds.has(exercise.id) && (
