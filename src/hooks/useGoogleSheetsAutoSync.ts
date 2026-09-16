@@ -16,6 +16,8 @@ export function useGoogleSheetsAutoSync(
   defer = false
 ) {
   const isSyncingRef = useRef(false);
+  const dataRef = useRef({ exercises, routines, routineExercises, sessions, sets, settings });
+  dataRef.current = { exercises, routines, routineExercises, sessions, sets, settings };
 
   useEffect(() => {
     const config = settings.google_sheets;
@@ -33,8 +35,12 @@ export function useGoogleSheetsAutoSync(
         return;
       }
 
+      const currentData = dataRef.current;
+      const currentConfig = currentData.settings.google_sheets;
+      if (!currentConfig || !currentConfig.enabled || !currentConfig.webAppUrl) return;
+
       // Check if 12 hours have passed since last sync
-      if (!isBackupDue(config.lastSyncTime, 12)) {
+      if (!isBackupDue(currentConfig.lastSyncTime, 12)) {
         return;
       }
 
@@ -43,26 +49,26 @@ export function useGoogleSheetsAutoSync(
         console.log('[GoogleSheetsAutoSync] Triggering scheduled 2x daily backup...');
 
         const result = await syncToGoogleSheets(
-          config.webAppUrl,
-          exercises,
-          routines,
-          routineExercises,
-          sessions,
-          sets,
-          settings,
-          config.secretKey
+          currentConfig.webAppUrl,
+          currentData.exercises,
+          currentData.routines,
+          currentData.routineExercises,
+          currentData.sessions,
+          currentData.sets,
+          currentData.settings,
+          currentConfig.secretKey
         );
 
         if (result.success) {
-          await updateSheetsStatus(settings.id, {
+          await updateSheetsStatus(currentData.settings.id, {
             lastSyncTime: result.timestamp || new Date().toISOString(),
             lastSyncStatus: 'success',
             lastSyncError: undefined,
-            lastRecordCount: sessions.length
+            lastRecordCount: currentData.sessions.length
           });
           console.log('[GoogleSheetsAutoSync] Scheduled backup successful.');
         } else {
-          await updateSheetsStatus(settings.id, {
+          await updateSheetsStatus(currentData.settings.id, {
             lastSyncStatus: 'error',
             lastSyncError: result.message
           });
@@ -74,7 +80,7 @@ export function useGoogleSheetsAutoSync(
       }
     };
 
-    // Run check on mount or when data updates
+    // Run check on mount or when config/defer updates
     checkAndSync();
 
     // Check on coming back online
@@ -95,12 +101,6 @@ export function useGoogleSheetsAutoSync(
     settings.google_sheets?.webAppUrl,
     settings.google_sheets?.autoSyncTwiceDaily,
     settings.google_sheets?.lastSyncTime,
-    defer,
-    exercises,
-    routines,
-    routineExercises,
-    sessions,
-    sets,
-    settings
+    defer
   ]);
 }

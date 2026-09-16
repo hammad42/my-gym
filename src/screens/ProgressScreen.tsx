@@ -35,7 +35,20 @@ const MUSCLE_LABELS: Record<string, string> = {
 };
 
 export const ProgressScreen: React.FC<Props> = ({ exercises, sessions, sets, settings }) => {
-  const [selectedExercise, setSelectedExercise] = useState<string>('');
+  const [selectedExercise, setSelectedExerciseState] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return sessionStorage.getItem('mygym_progress_selected_exercise') || '';
+    }
+    return '';
+  });
+
+  const setSelectedExercise = (id: string) => {
+    setSelectedExerciseState(id);
+    if (typeof window !== 'undefined') {
+      if (id) sessionStorage.setItem('mygym_progress_selected_exercise', id);
+      else sessionStorage.removeItem('mygym_progress_selected_exercise');
+    }
+  };
 
   const records = useMemo(
     () => computePersonalRecords(sessions, sets, exercises),

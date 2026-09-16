@@ -42,8 +42,8 @@ export const DEFAULT_EXERCISES: Exercise[] = [
   { id: 'ex-skullcrusher', name: 'Skull Crusher', muscle_group: 'triceps', equipment: 'barbell', icon: 'Dumbbell', color: '#fb7185', is_default: true, created_at: '2026-01-01T00:00:00.000Z' },
 
   // Core / Cardio
-  { id: 'ex-plank', name: 'Plank (seconds)', muscle_group: 'core', equipment: 'bodyweight', icon: 'Timer', color: '#facc15', is_default: true, created_at: '2026-01-01T00:00:00.000Z' },
-  { id: 'ex-treadmill', name: 'Treadmill Run (minutes)', muscle_group: 'cardio', equipment: 'machine', icon: 'HeartPulse', color: '#ef4444', is_default: true, created_at: '2026-01-01T00:00:00.000Z' }
+  { id: 'ex-plank', name: 'Plank (seconds)', muscle_group: 'core', equipment: 'bodyweight', icon: 'Timer', color: '#facc15', is_default: true, metric: 'seconds', created_at: '2026-01-01T00:00:00.000Z' },
+  { id: 'ex-treadmill', name: 'Treadmill Run (minutes)', muscle_group: 'cardio', equipment: 'machine', icon: 'HeartPulse', color: '#ef4444', is_default: true, metric: 'minutes', created_at: '2026-01-01T00:00:00.000Z' }
 ];
 
 // ---------------------------------------------------------------------------

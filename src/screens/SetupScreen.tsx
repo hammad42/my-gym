@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings, MuscleGroup, Equipment } from '../types';
-import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup, convertStoredWeights } from '../lib/db';
+import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup, applyUnitChange as dbApplyUnitChange } from '../lib/db';
 import { buildBackup, isBackupPayload, downloadBackup, type BackupPayload } from '../lib/exportImport';
 import {
   testGoogleSheetsConnection,
@@ -26,7 +26,9 @@ import {
   Cloud,
   RefreshCw,
   Copy,
-  ExternalLink
+  ExternalLink,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 
 interface Props {
@@ -66,7 +68,21 @@ export const SetupScreen: React.FC<Props> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Google Sheets config — edited locally, saved to settings on "Save"
-  const [sheetsUrl, setSheetsUrl] = useState(settings.google_sheets?.webAppUrl || '');
+  const [sheetsUrl, setSheetsUrlState] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = sessionStorage.getItem('mygym_setup_sheets_url');
+      if (saved) return saved;
+    }
+    return settings.google_sheets?.webAppUrl || '';
+  });
+
+  const setSheetsUrl = (url: string) => {
+    setSheetsUrlState(url);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('mygym_setup_sheets_url', url);
+    }
+  };
+
   const [secretKey, setSecretKey] = useState(settings.google_sheets?.secretKey || '');
   const [autoSync, setAutoSync] = useState(settings.google_sheets?.autoSyncTwiceDaily ?? true);
   const [isSyncingSheets, setIsSyncingSheets] = useState(false);
@@ -76,8 +92,11 @@ export const SetupScreen: React.FC<Props> = ({
   // Unit switching rewrites stored weights, so it asks first and reports the count.
   const [pendingUnit, setPendingUnit] = useState<'kg' | 'lb' | null>(null);
   const [pendingImport, setPendingImport] = useState<{ name: string; payload: BackupPayload; sessions: number; sets: number } | null>(null);
+  const [showArchivedExercises, setShowArchivedExercises] = useState(false);
+  const [confirmDeleteExerciseId, setConfirmDeleteExerciseId] = useState<string | null>(null);
 
   const library = selectableExercises(exercises);
+  const archivedExercises = exercises.filter((e) => e.is_archived);
 
   const flash = (text: string) => {
     setMessage(text);
@@ -101,6 +120,10 @@ export const SetupScreen: React.FC<Props> = ({
   };
 
   const handleTestSheetsConnection = async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      flash("You're offline — cannot connect to Google Sheets.");
+      return;
+    }
     if (!sheetsUrl.trim()) {
       flash('Paste your Web App URL first.');
       return;
@@ -115,6 +138,10 @@ export const SetupScreen: React.FC<Props> = ({
     const config = settings.google_sheets;
     if (!config?.webAppUrl) {
       flash('Save your Google Sheets settings first.');
+      return;
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      flash("You're offline — this device will sync when you're back online.");
       return;
     }
     setIsSyncingSheets(true);
@@ -142,6 +169,10 @@ export const SetupScreen: React.FC<Props> = ({
     const config = settings.google_sheets;
     if (!config?.webAppUrl) {
       flash('Save your Google Sheets settings first.');
+      return;
+    }
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      flash("You're offline — cannot connect to Google Sheets.");
       return;
     }
     setIsRestoringSheets(true);
@@ -214,13 +245,12 @@ export const SetupScreen: React.FC<Props> = ({
   };
 
   /**
-   * Switching units rewrites every stored weight, because weights are
+   * Switching units rewrites every stored weight atomically, because weights are
    * dimensionless floats — relabelling them would silently turn six months of
    * kilograms into pounds.
    */
   const applyUnitChange = async (unit: 'kg' | 'lb') => {
-    const counts = await convertStoredWeights(unit);
-    await updateSettings({ weight_unit: unit });
+    const counts = await dbApplyUnitChange(unit);
     setPendingUnit(null);
     flash(
       `Switched to ${unit}. Converted ${counts.sets} set(s) and ${counts.sessions} body-weight value(s).`
@@ -250,9 +280,23 @@ export const SetupScreen: React.FC<Props> = ({
   ]);
 
   const handleArchiveExercise = async (exercise: Exercise) => {
-    // Archive rather than delete whenever anything still references it.
     await db.exercises.update(exercise.id, { is_archived: true });
-    flash(`${exercise.name} hidden from pickers.`);
+    flash(`${exercise.name} archived.`);
+  };
+
+  const handleRestoreExercise = async (exercise: Exercise) => {
+    await db.exercises.update(exercise.id, { is_archived: false });
+    flash(`${exercise.name} restored to library.`);
+  };
+
+  const handleDeleteExercise = async (exercise: Exercise) => {
+    if (usedExerciseIds.has(exercise.id)) {
+      flash('Cannot delete an exercise that is logged in history or used in routines.');
+      return;
+    }
+    await db.exercises.delete(exercise.id);
+    setConfirmDeleteExerciseId(null);
+    flash(`${exercise.name} permanently deleted.`);
   };
 
   return (
@@ -435,7 +479,7 @@ export const SetupScreen: React.FC<Props> = ({
                 <button
                   onClick={() => handleArchiveExercise(ex)}
                   className="text-slate-600 hover:text-rose-400 transition"
-                  title="Hide from pickers"
+                  title="Archive exercise"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
@@ -443,6 +487,67 @@ export const SetupScreen: React.FC<Props> = ({
             </div>
           ))}
         </div>
+
+        {archivedExercises.length > 0 && (
+          <div className="pt-2 border-t border-slate-700/60">
+            <button
+              onClick={() => setShowArchivedExercises(!showArchivedExercises)}
+              className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-300 font-semibold"
+            >
+              {showArchivedExercises ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              Archived ({archivedExercises.length})
+            </button>
+
+            {showArchivedExercises && (
+              <div className="mt-2 space-y-2 max-h-48 overflow-y-auto pr-1">
+                {archivedExercises.map((ex) => (
+                  <div key={ex.id} className="flex items-center gap-2.5 bg-slate-900/60 p-2 rounded-xl">
+                    <ExerciseIcon exercise={ex} size="sm" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-slate-400 truncate">{ex.name}</p>
+                      <p className="text-[10px] text-slate-500">
+                        {ex.muscle_group.replace('_', ' ')} · {ex.equipment}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => handleRestoreExercise(ex)}
+                      className="text-xs text-orange-400 hover:text-orange-300 px-2 py-1 rounded bg-slate-800 border border-slate-700 font-semibold"
+                      title="Restore exercise"
+                    >
+                      Restore
+                    </button>
+                    {!usedExerciseIds.has(ex.id) && (
+                      confirmDeleteExerciseId === ex.id ? (
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleDeleteExercise(ex)}
+                            className="text-[10px] bg-rose-600 hover:bg-rose-500 text-white px-2 py-1 rounded font-bold"
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            onClick={() => setConfirmDeleteExerciseId(null)}
+                            className="text-[10px] bg-slate-800 text-slate-400 px-1.5 py-1 rounded"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => setConfirmDeleteExerciseId(ex.id)}
+                          className="text-slate-600 hover:text-rose-400 p-1 transition"
+                          title="Delete permanently"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </section>
 
       {/* Google Sheets backup */}

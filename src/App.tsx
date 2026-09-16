@@ -76,6 +76,7 @@ export const App: React.FC = () => {
   const handleHeaderQuickSync = async () => {
     const config = settings.google_sheets;
     if (!config?.enabled || !config.webAppUrl || isHeaderSyncing) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
     setIsHeaderSyncing(true);
     try {

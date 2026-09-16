@@ -96,6 +96,9 @@ export interface GoogleSheetsFetchResponse {
   scriptVersion?: number;
 }
 
+export type SyncPartItemKind = Exclude<SyncPart['k'], 'meta'>;
+export type PartForKind<K extends SyncPartItemKind> = Extract<SyncPart, { k: K }>;
+
 /**
  * Splits a list into parts whose JSON stays inside the upload budget.
  *
@@ -103,12 +106,17 @@ export interface GoogleSheetsFetchResponse {
  * dropped: the server rejects that request and the error surfaces to the user,
  * which is better than a backup that silently omits a row.
  */
-export function sliceBySize<T>(items: T[], kind: string, maxChars: number = SYNC_PART_CHARS): SyncPart[] {
-  const parts: SyncPart[] = [];
-  let current: T[] = [];
+export function sliceBySize<K extends SyncPartItemKind>(
+  items: PartForKind<K>['items'],
+  kind: K,
+  maxChars: number = SYNC_PART_CHARS
+): PartForKind<K>[] {
+  const parts: PartForKind<K>[] = [];
+  let current: any[] = [];
   let size = 2; // the enclosing [ ]
 
-  const wrap = (batch: T[]): SyncPart => ({ k: kind, items: batch } as SyncPart);
+  const wrap = (batch: any[]): PartForKind<K> =>
+    ({ k: kind, items: batch } as PartForKind<K>);
 
   for (const item of items) {
     const itemSize = JSON.stringify(item).length + 1; // + separator

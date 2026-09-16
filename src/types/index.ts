@@ -23,6 +23,8 @@ export type Equipment =
   | 'kettlebell'
   | 'other';
 
+export type ExerciseMetric = 'reps' | 'seconds' | 'minutes';
+
 /**
  * A single entry in the exercise library (mirrors Category in the ledger app).
  * Exercises are archived rather than deleted whenever a logged set still
@@ -38,6 +40,8 @@ export interface Exercise {
   is_default: boolean;
   /** Hidden from pickers but kept so history keeps rendering. */
   is_archived?: boolean;
+  /** Unit of measurement for the second column ('reps' by default). */
+  metric?: ExerciseMetric;
   created_at: string;
 }
 
@@ -144,6 +148,8 @@ export interface SessionSummary {
   /** Sum of weight * reps across working sets (weight 0 counts as 0 volume). */
   totalVolume: number;
   exerciseCount: number;
+  /** Sum of seconds performed across working sets for time-based exercises. */
+  totalSeconds?: number;
 }
 
 export interface WeekSummary {
@@ -167,9 +173,9 @@ export interface PersonalRecord {
   lastPerformed?: string;
 }
 
-/** Epley estimated 1RM — used for PR tracking and progress charts. */
-export function estimateOneRepMax(weight: number, reps: number): number {
-  if (reps <= 0 || weight <= 0) return 0;
+/** Epley estimated 1RM — capped at maxReps (default 15) to prevent endurance sets from skewing PRs. */
+export function estimateOneRepMax(weight: number, reps: number, maxReps = 15): number {
+  if (reps <= 0 || weight <= 0 || reps > maxReps) return 0;
   if (reps === 1) return weight;
   return Math.round(weight * (1 + reps / 30));
 }

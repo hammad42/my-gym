@@ -44,14 +44,14 @@ export class GymDatabase extends Dexie {
       this.routines.bulkAdd(DEFAULT_ROUTINES);
       this.routine_exercises.bulkAdd(DEFAULT_ROUTINE_EXERCISES);
       this.settings.add(DEFAULT_SETTINGS);
-      this.bulkAddSampleLogs();
+      return this.bulkAddSampleLogs();
     });
   }
 
   private async bulkAddSampleLogs() {
     const { sessions, sets } = generateSampleSessions();
-    this.sessions.bulkAdd(sessions);
-    this.sets.bulkAdd(sets);
+    await this.sessions.bulkAdd(sessions);
+    await this.sets.bulkAdd(sets);
   }
 }
 
@@ -141,8 +141,9 @@ export async function restoreFromBackup(
 
   await db.transaction(
     'rw',
-    [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings],
+    [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings, db.drafts],
     async () => {
+      await db.drafts.clear();
       await db.exercises.clear();
       await db.routines.clear();
       await db.routine_exercises.clear();
@@ -179,8 +180,9 @@ export async function resetDatabaseWithSampleData(): Promise<void> {
 
   await db.transaction(
     'rw',
-    [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings],
+    [db.exercises, db.routines, db.routine_exercises, db.sessions, db.sets, db.settings, db.drafts],
     async () => {
+      await db.drafts.clear();
       await db.exercises.clear();
       await db.routines.clear();
       await db.routine_exercises.clear();
@@ -207,7 +209,8 @@ export async function resetDatabaseWithSampleData(): Promise<void> {
  * exercise library, routines and settings intact.
  */
 export async function clearAllLogs(): Promise<void> {
-  await db.transaction('rw', [db.sessions, db.sets], async () => {
+  await db.transaction('rw', [db.sessions, db.sets, db.drafts], async () => {
+    await db.drafts.clear();
     await db.sessions.clear();
     await db.sets.clear();
   });
@@ -258,6 +261,42 @@ export async function convertStoredWeights(target: 'kg' | 'lb'): Promise<{ sets:
   });
 
   return { sets: setCount, sessions: sessionCount };
+}
+
+/**
+ * Switches the database weight unit atomically in a single transaction (A2).
+ * Converts sets and session body_weights and updates settings.weight_unit.
+ * If settings is already in the target unit, this is an idempotent no-op.
+ */
+export async function applyUnitChange(target: 'kg' | 'lb'): Promise<{ sets: number; sessions: number }> {
+  return db.transaction('rw', [db.sets, db.sessions, db.settings], async () => {
+    const settings = await db.settings.get('general');
+    if (!settings || settings.weight_unit === target) {
+      return { sets: 0, sessions: 0 }; // already in the target unit — no-op
+    }
+    const factor = target === 'lb' ? LB_PER_KG : 1 / LB_PER_KG;
+    let sets = 0;
+    let sessions = 0;
+
+    await db.sets
+      .filter((s) => s.weight > 0)
+      .modify((s) => {
+        s.weight = Math.round(s.weight * factor * 100) / 100;
+        sets++;
+      });
+
+    await db.sessions
+      .filter((s) => (s.body_weight ?? 0) > 0)
+      .modify((s) => {
+        if (s.body_weight != null) {
+          s.body_weight = Math.round(s.body_weight * factor * 100) / 100;
+          sessions++;
+        }
+      });
+
+    await db.settings.update('general', { weight_unit: target });
+    return { sets, sessions };
+  });
 }
 
 /** Save a full workout: one session row plus its set rows, atomically. */

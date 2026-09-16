@@ -64,16 +64,24 @@ export function resolveSessions(
 export function summarizeSession(resolved: ResolvedSession): SessionSummary {
   let totalReps = 0;
   let totalVolume = 0;
-  for (const { set } of resolved.sets) {
+  let totalSeconds = 0;
+  for (const { set, exercise } of resolved.sets) {
     if (set.is_warmup) continue;
-    totalReps += set.reps;
+    if (exercise.metric === 'seconds') {
+      totalSeconds += set.reps;
+    } else if (exercise.metric === 'minutes') {
+      totalSeconds += set.reps * 60;
+    } else {
+      totalReps += set.reps;
+    }
     totalVolume += volumeOf(set.weight, set.reps);
   }
   return {
     totalSets: resolved.sets.length,
     totalReps,
     totalVolume,
-    exerciseCount: resolved.exercises.length
+    exerciseCount: resolved.exercises.length,
+    totalSeconds
   };
 }
 
@@ -183,6 +191,8 @@ export function computePersonalRecords(
     if (set.is_warmup) continue;
     const exercise = exerciseById.get(set.exercise_id);
     if (!exercise) continue;
+    // Skip time-based exercises from 1RM personal records
+    if (exercise.metric && exercise.metric !== 'reps') continue;
 
     const session = sessions.find((s) => s.id === set.session_id);
     const date = session?.date || set.created_at.slice(0, 10);
@@ -196,7 +206,7 @@ export function computePersonalRecords(
         bestWeightReps: set.reps,
         bestWeightDate: date,
         bestOneRepMax: oneRm,
-        bestOneRepMaxDate: date,
+        bestOneRepMaxDate: oneRm > 0 ? date : '',
         bestSetCount: 1,
         lastPerformed: date
       });

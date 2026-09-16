@@ -22,7 +22,8 @@ import {
   Flame,
   AlertCircle,
   Zap,
-  RotateCcw
+  RotateCcw,
+  MessageSquare
 } from 'lucide-react';
 
 interface Props {
@@ -39,7 +40,7 @@ interface Props {
 /** One exercise and its logged sets in the in-progress workout. */
 interface ExerciseBlock {
   exercise_id: string;
-  sets: { weight: string; reps: string; is_warmup: boolean }[];
+  sets: { weight: string; reps: string; is_warmup: boolean; notes?: string }[];
 }
 
 /** Parses a non-negative number from a partially typed input, decimals intact. */
@@ -72,6 +73,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
   const [isSuccess, setIsSuccess] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [draftRestored, setDraftRestored] = useState(false);
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const [draftReady, setDraftReady] = useState(false);
 
   // Rest timer. Held as an absolute deadline rather than a decrementing counter:
@@ -145,12 +147,19 @@ export const LogWorkoutScreen: React.FC<Props> = ({
         setDuration(draft.duration);
         setBodyWeight(draft.bodyWeight);
         setNotes(draft.notes);
-        setBlocks(
-          draft.blocks.map((b) => ({
+
+        const known = new Set(exercises.map((e) => e.id));
+        const validBlocks = draft.blocks
+          .filter((b) => known.has(b.exercise_id))
+          .map((b) => ({
             exercise_id: b.exercise_id,
-            sets: b.sets.map((s) => ({ ...s }))
-          }))
-        );
+            sets: b.sets.map((s: any) => ({ ...s, notes: s.notes || '' }))
+          }));
+
+        setBlocks(validBlocks);
+        if (validBlocks.length !== draft.blocks.length) {
+          setDraftNotice('Some exercises in your draft no longer exist and were removed.');
+        }
         setDraftRestored(true);
         // A rest that expired while away should not silently resume or beep.
         if (draft.restDeadline && draft.restDeadline > Date.now()) {
@@ -202,6 +211,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
   const discardDraft = async () => {
     await clearWorkoutDraft();
     setDraftRestored(false);
+    setDraftNotice(null);
     setRoutineId('');
     setName('');
     setDate(getTodayString());
@@ -233,7 +243,8 @@ export const LogWorkoutScreen: React.FC<Props> = ({
           sets: Array.from({ length: line.target_sets }, () => ({
             weight: '',
             reps: String(line.target_reps),
-            is_warmup: false
+            is_warmup: false,
+            notes: ''
           }))
         }))
       );
@@ -278,7 +289,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
           ...b,
           sets: [
             ...b.sets,
-            { weight: last?.weight || '', reps: last?.reps || '', is_warmup: false }
+            { weight: last?.weight || '', reps: last?.reps || '', is_warmup: false, notes: '' }
           ]
         };
       })
@@ -296,11 +307,12 @@ export const LogWorkoutScreen: React.FC<Props> = ({
 
   const addBlock = () => {
     const firstAvailable = available.find((e) => !blocks.some((b) => b.exercise_id === e.id));
+    if (!firstAvailable) return;
     setBlocks((prev) => [
       ...prev,
       {
-        exercise_id: firstAvailable?.id || available[0]?.id || '',
-        sets: [{ weight: '', reps: '', is_warmup: false }]
+        exercise_id: firstAvailable.id,
+        sets: [{ weight: '', reps: '', is_warmup: false, notes: '' }]
       }
     ]);
   };
@@ -340,6 +352,12 @@ export const LogWorkoutScreen: React.FC<Props> = ({
       return;
     }
 
+    const exerciseIds = filledBlocks.map((b) => b.exercise_id);
+    if (new Set(exerciseIds).size !== exerciseIds.length) {
+      setError('Each exercise should only appear once in a workout.');
+      return;
+    }
+
     const sessionId = `session-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const session: WorkoutSession = {
       id: sessionId,
@@ -363,7 +381,7 @@ export const LogWorkoutScreen: React.FC<Props> = ({
           weight: Math.round(num(s.weight) * 100) / 100,
           reps: Math.round(num(s.reps) * 100) / 100,
           is_warmup: s.is_warmup,
-          notes: ''
+          notes: (s.notes || '').trim()
         });
       });
     }
@@ -447,6 +465,18 @@ function signalRestComplete(): void {
             className="flex items-center gap-1 text-[11px] font-semibold text-sky-300/80 hover:text-sky-100 shrink-0"
           >
             <RotateCcw className="w-3.5 h-3.5" /> Start fresh
+          </button>
+        </div>
+      )}
+
+      {draftNotice && (
+        <div className="flex items-center justify-between gap-2 bg-amber-950/50 border border-amber-800/50 rounded-2xl px-3.5 py-2.5">
+          <p className="text-[11px] text-amber-200">{draftNotice}</p>
+          <button
+            onClick={() => setDraftNotice(null)}
+            className="text-[11px] font-semibold text-amber-300 hover:text-amber-100 shrink-0"
+          >
+            Dismiss
           </button>
         </div>
       )}
@@ -575,11 +605,14 @@ function signalRestComplete(): void {
                 className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded-xl px-2.5 py-2 text-sm font-semibold text-white focus:outline-none focus:border-orange-500"
                 aria-label="Exercise"
               >
-                {available.map((ex) => (
-                  <option key={ex.id} value={ex.id}>
-                    {ex.name}
-                  </option>
-                ))}
+                {available.map((ex) => {
+                  const isSelectedElsewhere = blocks.some((b, i) => i !== blockIndex && b.exercise_id === ex.id);
+                  return (
+                    <option key={ex.id} value={ex.id} disabled={isSelectedElsewhere}>
+                      {ex.name}{isSelectedElsewhere ? ' (already added)' : ''}
+                    </option>
+                  );
+                })}
               </select>
               <button
                 onClick={() => removeBlock(blockIndex)}
@@ -594,57 +627,86 @@ function signalRestComplete(): void {
               const weight = num(set.weight);
               const reps = num(set.reps);
               const oneRm = estimateOneRepMax(weight, reps);
+              const repsPlaceholder =
+                exercise?.metric === 'seconds' ? 'sec' : exercise?.metric === 'minutes' ? 'min' : 'reps';
               return (
-                <div
-                  key={setIndex}
-                  className={`flex items-center gap-2 rounded-xl px-2 py-1.5 ${
-                    set.is_warmup ? 'bg-slate-900/50' : 'bg-slate-900/80'
-                  }`}
-                >
-                  <span className="w-6 text-[11px] font-bold text-slate-500 tnum">{setIndex + 1}</span>
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    step="2.5"
-                    value={set.weight}
-                    onChange={(e) => updateSet(blockIndex, setIndex, { weight: e.target.value })}
-                    className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-center text-white tnum focus:outline-none focus:border-orange-500"
-                    placeholder={`wt ${settings.weight_unit}`}
-                    aria-label="Weight"
-                  />
-                  <input
-                    type="number"
-                    inputMode="decimal"
-                    min={0}
-                    step="any"
-                    value={set.reps}
-                    onChange={(e) => updateSet(blockIndex, setIndex, { reps: e.target.value })}
-                    className="w-16 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-center text-white tnum focus:outline-none focus:border-orange-500"
-                    placeholder="reps"
-                    aria-label="Reps"
-                  />
-                  <button
-                    onClick={() => updateSet(blockIndex, setIndex, { is_warmup: !set.is_warmup })}
-                    className={`text-[10px] font-bold px-2 py-1.5 rounded-lg border transition ${
-                      set.is_warmup
-                        ? 'bg-sky-950/60 border-sky-700/60 text-sky-300'
-                        : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                <div key={setIndex} className="space-y-1.5">
+                  <div
+                    className={`flex items-center gap-2 rounded-xl px-2 py-1.5 ${
+                      set.is_warmup ? 'bg-slate-900/50' : 'bg-slate-900/80'
                     }`}
-                    title="Toggle warmup set"
                   >
-                    W
-                  </button>
-                  <span className="w-14 text-right text-[10px] text-slate-500 tnum">
-                    {oneRm > 0 ? `~${oneRm} 1RM` : ''}
-                  </span>
-                  <button
-                    onClick={() => removeSet(blockIndex, setIndex)}
-                    className="text-slate-600 hover:text-rose-400 transition"
-                    aria-label="Remove set"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+                    <span className="w-6 text-[11px] font-bold text-slate-500 tnum">{setIndex + 1}</span>
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step="2.5"
+                      value={set.weight}
+                      onChange={(e) => updateSet(blockIndex, setIndex, { weight: e.target.value })}
+                      className="w-20 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-center text-white tnum focus:outline-none focus:border-orange-500"
+                      placeholder={`wt ${settings.weight_unit}`}
+                      aria-label="Weight"
+                    />
+                    <input
+                      type="number"
+                      inputMode="decimal"
+                      min={0}
+                      step="any"
+                      value={set.reps}
+                      onChange={(e) => updateSet(blockIndex, setIndex, { reps: e.target.value })}
+                      className="w-16 bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-sm text-center text-white tnum focus:outline-none focus:border-orange-500"
+                      placeholder={repsPlaceholder}
+                      aria-label="Reps"
+                    />
+                    <button
+                      onClick={() => updateSet(blockIndex, setIndex, { is_warmup: !set.is_warmup })}
+                      className={`text-[10px] font-bold px-2 py-1.5 rounded-lg border transition ${
+                        set.is_warmup
+                          ? 'bg-sky-950/60 border-sky-700/60 text-sky-300'
+                          : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                      }`}
+                      title="Toggle warmup set"
+                    >
+                      W
+                    </button>
+                    <button
+                      onClick={() => {
+                        const nextNotes = set.notes !== undefined ? undefined : '';
+                        updateSet(blockIndex, setIndex, { notes: nextNotes });
+                      }}
+                      className={`text-[10px] p-1.5 rounded-lg border transition ${
+                        set.notes
+                          ? 'bg-amber-950/60 border-amber-700/60 text-amber-300'
+                          : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                      }`}
+                      title="Add note to set"
+                      aria-label="Set note"
+                    >
+                      <MessageSquare className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="w-14 text-right text-[10px] text-slate-500 tnum">
+                      {oneRm > 0 ? `~${oneRm} 1RM` : ''}
+                    </span>
+                    <button
+                      onClick={() => removeSet(blockIndex, setIndex)}
+                      className="text-slate-600 hover:text-rose-400 transition"
+                      aria-label="Remove set"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  {set.notes !== undefined && (
+                    <div className="px-2 pb-0.5">
+                      <input
+                        type="text"
+                        value={set.notes}
+                        onChange={(e) => updateSet(blockIndex, setIndex, { notes: e.target.value })}
+                        placeholder="Set notes (e.g. paused, dropset, form cue)..."
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-orange-500"
+                      />
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -661,7 +723,7 @@ function signalRestComplete(): void {
 
       <button
         onClick={addBlock}
-        disabled={available.length === 0}
+        disabled={available.length === 0 || !available.some((e) => !blocks.some((b) => b.exercise_id === e.id))}
         className="w-full flex items-center justify-center gap-2 border border-dashed border-slate-600 rounded-2xl py-3.5 text-sm text-slate-400 hover:text-orange-400 hover:border-orange-500/60 transition disabled:opacity-40"
       >
         <Dumbbell className="w-4 h-4" /> Add exercise

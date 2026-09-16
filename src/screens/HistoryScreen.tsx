@@ -14,8 +14,38 @@ interface Props {
 }
 
 export const HistoryScreen: React.FC<Props> = ({ exercises, sessions, sets, settings }) => {
-  const [query, setQuery] = useState('');
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [query, setQueryState] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return sessionStorage.getItem('mygym_history_query') || '';
+    }
+    return '';
+  });
+
+  const setQuery = (q: string) => {
+    setQueryState(q);
+    if (typeof window !== 'undefined') {
+      sessionStorage.setItem('mygym_history_query', q);
+    }
+  };
+
+  const [expanded, setExpandedState] = useState<string | null>(() => {
+    if (typeof window !== 'undefined') {
+      return sessionStorage.getItem('mygym_history_expanded');
+    }
+    return null;
+  });
+
+  const setExpanded = (id: string | null | ((prev: string | null) => string | null)) => {
+    setExpandedState((prev) => {
+      const next = typeof id === 'function' ? id(prev) : id;
+      if (typeof window !== 'undefined') {
+        if (next) sessionStorage.setItem('mygym_history_expanded', next);
+        else sessionStorage.removeItem('mygym_history_expanded');
+      }
+      return next;
+    });
+  };
+
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const resolved = useMemo(() => resolveSessions(sessions, sets, exercises), [sessions, sets, exercises]);
@@ -127,13 +157,25 @@ export const HistoryScreen: React.FC<Props> = ({ exercises, sessions, sets, sett
                                     {exSets.map(({ set }) => (
                                       <span
                                         key={set.id}
-                                        className={`text-[10px] tnum px-1.5 py-0.5 rounded-md border ${
+                                        title={set.notes || undefined}
+                                        className={`text-[10px] tnum px-1.5 py-0.5 rounded-md border inline-flex items-center gap-1 ${
                                           set.is_warmup
                                             ? 'bg-sky-950/40 border-sky-800/40 text-sky-300'
                                             : 'bg-slate-900 border-slate-700 text-slate-300'
                                         }`}
                                       >
-                                        {set.weight > 0 ? `${set.weight}×${set.reps}` : `${set.reps} reps`}
+                                        <span>
+                                          {set.weight > 0
+                                            ? `${set.weight}×${set.reps}`
+                                            : ex.metric === 'seconds'
+                                            ? `${set.reps}s`
+                                            : ex.metric === 'minutes'
+                                            ? `${set.reps}m`
+                                            : `${set.reps} reps`}
+                                        </span>
+                                        {set.notes && (
+                                          <span className="text-[9px] text-amber-400 italic">({set.notes})</span>
+                                        )}
                                       </span>
                                     ))}
                                   </div>

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, renderHook } from '@testing-library/react';
-import { db, initializeDatabase, resetDatabaseWithSampleData, saveWorkout, convertStoredWeights, LB_PER_KG } from '../lib/db';
+import { db, initializeDatabase, resetDatabaseWithSampleData, saveWorkout, convertStoredWeights, applyUnitChange, LB_PER_KG } from '../lib/db';
 import {
   clearWorkoutDraft,
   draftHasContent,
@@ -205,17 +205,18 @@ describe('weight unit conversion (BUG-02)', () => {
     expect((await db.sets.get('a'))?.weight).toBeCloseTo(82.5, 1);
   });
 
-  it('does not double-convert when the same unit is applied twice', async () => {
+  it('does not double-convert when the same unit is applied twice via applyUnitChange', async () => {
+    await db.settings.put({ id: 'general', weight_unit: 'kg', weekly_goal: 4, default_rest_seconds: 90 });
     await saveWorkout(session('c5'), [
       { id: 'a', exercise_id: 'ex-bench', set_number: 1, weight: 50, reps: 5, is_warmup: false, notes: '' }
     ]);
-    const first = await convertStoredWeights('lb');
-    const second = await convertStoredWeights('lb');
+    const first = await applyUnitChange('lb');
+    const second = await applyUnitChange('lb');
     expect(first.sets).toBe(1);
-    expect(second.sets).toBe(1);
-    // Twice is intentional here (the caller guards it); assert the math is stable
-    // at 2x so a future double-call bug is at least visible in this test.
-    expect((await db.sets.get('a'))?.weight).toBeCloseTo(50 * LB_PER_KG * LB_PER_KG, 0);
+    expect(second.sets).toBe(0);
+    // Second call is an idempotent no-op — weights are not multiplied twice
+    expect((await db.sets.get('a'))?.weight).toBeCloseTo(50 * LB_PER_KG, 1);
+    expect((await db.settings.get('general'))?.weight_unit).toBe('lb');
   });
 });
 
