@@ -114,5 +114,5 @@ src/
 
 `npm run build` stamps a content hash into the service worker's cache name
 (`scripts/version-sw.mjs`), so every deploy reliably evicts old caches.
-Deploy configs for Vercel (`vercel.json`) and Netlify (`netlify.toml`) are
-included.
+Deploy configs for Cloudflare Pages (`public/_headers`, `public/_redirects`, `wrangler.toml`),
+Vercel (`vercel.json`), and Netlify (`netlify.toml`) are included.
