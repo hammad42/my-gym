@@ -17,8 +17,12 @@ import { db } from './db';
  * 50 KB at the network layer — the request fails with a bare "Failed to fetch"
  * before the script runs — so a growing training log could not be synced whole.
  * The client now streams the payload as parts and the script assembles them.
+ *
+ * v3 introduces per-session staging sheets (_MyGymBackupNew_<syncId>), LockService
+ * scoped strictly around the commit swap, and safeText formula injection escaping
+ * for readable training logs.
  */
-export const APPS_SCRIPT_PROTOCOL_VERSION = 2;
+export const APPS_SCRIPT_PROTOCOL_VERSION = 3;
 
 /**
  * Character budget for one uploaded part. The ceiling is the ~50 KB Apps Script
@@ -284,6 +288,16 @@ function unauthorizedResponse() {
   });
 }
 
+/** Escapes spreadsheet formula prefixes (=, +, -, @, \\t, \\r) with a leading single quote. */
+function safeText(value) {
+  if (value === null || value === undefined) return '';
+  var s = String(value);
+  if (/^[=+\\-@\\t\\r]/.test(s)) {
+    return "'" + s;
+  }
+  return s;
+}
+
 function doGet(e) {
   try {
     var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : 'ping';
@@ -336,7 +350,7 @@ function doPost(e) {
 
     if (action === 'fetch') return readBackup();
 
-    // --- partitioned upload (protocol v2) ---------------------------------
+    // --- partitioned upload (protocol v2/v3) ---------------------------------
     if (action === 'sync-start') return syncStart(payload);
     if (action === 'sync-part') return syncPart(payload);
     if (action === 'sync-commit') return syncCommit(payload);
@@ -351,24 +365,58 @@ function doPost(e) {
   }
 }
 
-/** Opens a new sync: clears the backup rows so parts start from a clean slate. */
+/**
+ * Opens a new sync session on a dedicated staging sheet: _MyGymBackupNew_<syncId>.
+ * The existing _MyGymBackup is left untouched until commit succeeds.
+ * Cleans up orphaned staging sheets older than 1 hour.
+ */
 function syncStart(payload) {
+  var syncId = String(payload.syncId || '');
+  if (!syncId) {
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Missing syncId.' });
+  }
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var backup = sheetNamed(ss, BACKUP_SHEET);
-  backup.clear();
+  var stagingName = '_MyGymBackupNew_' + syncId;
+
+  // Clean up stale staging sheets older than 1 hour
+  var now = Date.now();
+  var allSheets = ss.getSheets();
+  for (var i = 0; i < allSheets.length; i++) {
+    var sName = allSheets[i].getName();
+    if (sName.indexOf('_MyGymBackupNew_') === 0 && sName !== stagingName) {
+      var match = sName.match(/^_MyGymBackupNew_sync-(\\d+)-/);
+      if (match && (now - Number(match[1]) > 3600000)) {
+        try { ss.deleteSheet(allSheets[i]); } catch(e) {}
+      }
+    }
+  }
+
+  var staging = sheetNamed(ss, stagingName);
+  staging.clear();
 
   var props = PropertiesService.getScriptProperties();
-  props.setProperty('mygym_sync_id', String(payload.syncId || ''));
-  props.setProperty('mygym_part_count', '0');
+  props.setProperty('mygym_sync_id_' + syncId, syncId);
+  props.setProperty('mygym_part_count_' + syncId, '0');
+  if (payload.partCount != null) {
+    props.setProperty('mygym_expected_parts_' + syncId, String(payload.partCount));
+  }
 
   return jsonOut({ status: 'success', scriptVersion: SCRIPT_VERSION, message: 'Upload started.' });
 }
 
-/** Stores one payload part as a row. Each part is already size-bounded. */
+/** Stores one payload part as a row in the session staging sheet. */
 function syncPart(payload) {
-  var props = PropertiesService.getScriptProperties();
-  if (String(payload.syncId || '') !== props.getProperty('mygym_sync_id')) {
-    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Sync session expired. Start the sync again.' });
+  var syncId = String(payload.syncId || '');
+  if (!syncId) {
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Missing syncId.' });
+  }
+
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var stagingName = '_MyGymBackupNew_' + syncId;
+  var staging = ss.getSheetByName(stagingName);
+  if (!staging) {
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Sync session expired or not found. Start the sync again.' });
   }
 
   var serialized = JSON.stringify(payload.part);
@@ -376,38 +424,85 @@ function syncPart(payload) {
     return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Payload part is too large for a spreadsheet cell.' });
   }
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var backup = sheetNamed(ss, BACKUP_SHEET);
-  backup.getRange(backup.getLastRow() + 1, 1).setValue(serialized);
+  staging.getRange(staging.getLastRow() + 1, 1).setValue(serialized);
 
-  props.setProperty('mygym_part_count', String(parseInt(props.getProperty('mygym_part_count') || '0', 10) + 1));
+  var props = PropertiesService.getScriptProperties();
+  var countKey = 'mygym_part_count_' + syncId;
+  var count = parseInt(props.getProperty(countKey) || '0', 10) + 1;
+  props.setProperty(countKey, String(count));
 
   return jsonOut({ status: 'success', scriptVersion: SCRIPT_VERSION, part: payload.index });
 }
 
 /**
- * Closes the sync: reassembles the parts, writes the readable sheets from the
- * assembled data, and reports what was stored.
+ * Closes the sync: acquires a short ScriptLock, verifies all parts were received,
+ * reassembles data from staging, swaps staging sheet to _MyGymBackup, and writes readable sheets.
  */
 function syncCommit(payload) {
-  var props = PropertiesService.getScriptProperties();
-  if (String(payload.syncId || '') !== props.getProperty('mygym_sync_id')) {
-    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Sync session expired. Start the sync again.' });
+  var syncId = String(payload.syncId || '');
+  if (!syncId) {
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Missing syncId.' });
   }
 
-  var data = readParts();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var stagingName = '_MyGymBackupNew_' + syncId;
+  var staging = ss.getSheetByName(stagingName);
+  if (!staging) {
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Sync session expired or not found. Start the sync again.' });
+  }
+
+  var props = PropertiesService.getScriptProperties();
+  var expectedStr = props.getProperty('mygym_expected_parts_' + syncId);
+  var receivedStr = props.getProperty('mygym_part_count_' + syncId);
+  if (expectedStr && receivedStr && parseInt(receivedStr, 10) < parseInt(expectedStr, 10)) {
+    return jsonOut({
+      status: 'error',
+      scriptVersion: SCRIPT_VERSION,
+      message: 'Incomplete upload: expected ' + expectedStr + ' parts but received ' + receivedStr + '.'
+    });
+  }
+
+  var data = readPartsFromSheet(staging);
   if (!data) {
     return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'No uploaded data found to commit.' });
   }
 
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  writeWorkoutLogSheet(ss, data.sets, data.sessions, data.exercises);
-  writeSessionsSheet(ss, data.sessions, data.sets, data.exercises);
-  writeExercisesSheet(ss, data.exercises);
-  writeRoutinesSheet(ss, data.routines, data.routine_exercises, data.exercises);
+  var lock = LockService.getScriptLock();
+  try {
+    var hasLock = lock.waitLock(30000);
+    if (!hasLock) {
+      return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Could not acquire lock to finalize backup. Please retry.' });
+    }
 
-  props.deleteProperty('mygym_sync_id');
-  props.deleteProperty('mygym_part_count');
+    var oldBackup = ss.getSheetByName(BACKUP_SHEET);
+    if (oldBackup) {
+      oldBackup.setName('_MyGymBackup_Old_' + Date.now());
+      staging.setName(BACKUP_SHEET);
+      try { ss.deleteSheet(oldBackup); } catch(e) {}
+    } else {
+      staging.setName(BACKUP_SHEET);
+    }
+
+    writeWorkoutLogSheet(ss, data.sets, data.sessions, data.exercises);
+    writeSessionsSheet(ss, data.sessions, data.sets, data.exercises);
+    writeExercisesSheet(ss, data.exercises);
+    writeRoutinesSheet(ss, data.routines, data.routine_exercises, data.exercises);
+
+    props.deleteProperty('mygym_sync_id_' + syncId);
+    props.deleteProperty('mygym_part_count_' + syncId);
+    props.deleteProperty('mygym_expected_parts_' + syncId);
+
+    // Clean up any remaining _MyGymBackupNew_ or _MyGymBackup_Old_ sheets
+    var allSheets = ss.getSheets();
+    for (var i = 0; i < allSheets.length; i++) {
+      var sName = allSheets[i].getName();
+      if (sName !== BACKUP_SHEET && (sName.indexOf('_MyGymBackupNew_') === 0 || sName.indexOf('_MyGymBackup_Old_') === 0)) {
+        try { ss.deleteSheet(allSheets[i]); } catch(e) {}
+      }
+    }
+  } finally {
+    lock.releaseLock();
+  }
 
   return jsonOut({
     status: 'success',
@@ -422,42 +517,50 @@ function syncCommit(payload) {
   });
 }
 
-/** Single-request upload. Kept for small payloads and older clients. */
+/** Single-request upload with ScriptLock. Kept for small payloads and older clients. */
 function syncWhole(payload) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var data = {
-    version: payload.version,
-    exported_at: payload.exported_at,
-    exercises: payload.exercises || [],
-    routines: payload.routines || [],
-    routine_exercises: payload.routine_exercises || [],
-    sessions: payload.sessions || [],
-    sets: payload.sets || [],
-    settings: payload.settings || {}
-  };
+  var lock = LockService.getScriptLock();
+  try {
+    var hasLock = lock.waitLock(30000);
+    if (!hasLock) {
+      return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Could not acquire lock to finalize backup. Please retry.' });
+    }
 
-  writeWholeBackup(ss, data);
-  writeWorkoutLogSheet(ss, data.sets, data.sessions, data.exercises);
-  writeSessionsSheet(ss, data.sessions, data.sets, data.exercises);
-  writeExercisesSheet(ss, data.exercises);
-  writeRoutinesSheet(ss, data.routines, data.routine_exercises, data.exercises);
+    var data = {
+      version: payload.version,
+      exported_at: payload.exported_at,
+      exercises: payload.exercises || [],
+      routines: payload.routines || [],
+      routine_exercises: payload.routine_exercises || [],
+      sessions: payload.sessions || [],
+      sets: payload.sets || [],
+      settings: payload.settings || {}
+    };
 
-  return jsonOut({
-    status: 'success',
-    scriptVersion: SCRIPT_VERSION,
-    message: 'Backup saved successfully to your private Google Sheet!',
-    timestamp: new Date().toISOString(),
-    counts: { sessions: data.sessions.length, sets: data.sets.length, exercises: data.exercises.length }
-  });
+    writeWholeBackup(ss, data);
+    writeWorkoutLogSheet(ss, data.sets, data.sessions, data.exercises);
+    writeSessionsSheet(ss, data.sessions, data.sets, data.exercises);
+    writeExercisesSheet(ss, data.exercises);
+    writeRoutinesSheet(ss, data.routines, data.routine_exercises, data.exercises);
+
+    return jsonOut({
+      status: 'success',
+      scriptVersion: SCRIPT_VERSION,
+      message: 'Backup saved successfully to your private Google Sheet!',
+      timestamp: new Date().toISOString(),
+      counts: { sessions: data.sessions.length, sets: data.sets.length, exercises: data.exercises.length }
+    });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
-/** Reads every stored part and merges it back into one payload. */
-function readParts() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var backup = ss.getSheetByName(BACKUP_SHEET);
-  if (!backup || backup.getLastRow() < 1) return null;
+/** Reads every stored part from a given sheet and merges it back into one payload. */
+function readPartsFromSheet(sheet) {
+  if (!sheet || sheet.getLastRow() < 1) return null;
 
-  var values = backup.getRange(1, 1, backup.getLastRow(), 1).getValues();
+  var values = sheet.getRange(1, 1, sheet.getLastRow(), 1).getValues();
   var data = {
     version: '1.0.0',
     exported_at: null,
@@ -490,16 +593,10 @@ function readParts() {
   return seen ? data : null;
 }
 
-function readBackup() {
-  var data = readParts();
-  if (!data) {
-    return jsonOut({
-      status: 'error',
-      scriptVersion: SCRIPT_VERSION,
-      message: 'No backup found in this Google Sheet yet. Perform a Sync first.'
-    });
-  }
-  return jsonOut({ status: 'success', scriptVersion: SCRIPT_VERSION, data: data });
+function readParts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var backup = ss.getSheetByName(BACKUP_SHEET);
+  return readPartsFromSheet(backup);
 }
 
 function sheetNamed(ss, name) {
@@ -563,15 +660,15 @@ function writeWorkoutLogSheet(ss, sets, sessions, exercises) {
   sorted.forEach(function(s) {
     var session = sessionMap[s.session_id] || {};
     rows.push([
-      session.date || '',
-      session.name || '',
-      exMap[s.exercise_id] || s.exercise_id,
+      safeText(session.date || ''),
+      safeText(session.name || ''),
+      safeText(exMap[s.exercise_id] || s.exercise_id || ''),
       s.set_number,
       s.weight,
       s.reps,
       s.is_warmup ? 'YES' : 'NO',
-      s.session_id,
-      s.id
+      safeText(s.session_id || ''),
+      safeText(s.id || '')
     ]);
   });
 
@@ -605,16 +702,16 @@ function writeSessionsSheet(ss, sessions, sets, exercises) {
     return (b.date || '').localeCompare(a.date || '');
   }).forEach(function(s) {
     rows.push([
-      s.date,
-      s.name,
+      safeText(s.date || ''),
+      safeText(s.name || ''),
       s.duration_minutes,
       s.body_weight != null ? s.body_weight : '',
       (perSessionExercises[s.id] || []).length,
       setCount[s.id] || 0,
       reps[s.id] || 0,
       volume[s.id] || 0,
-      s.notes || '',
-      s.id
+      safeText(s.notes || ''),
+      safeText(s.id || '')
     ]);
   });
 
@@ -629,7 +726,13 @@ function writeExercisesSheet(ss, exercises) {
   var headers = ['Exercise', 'Muscle Group', 'Equipment', 'Archived', 'Exercise ID'];
   var rows = [headers];
   (exercises || []).forEach(function(x) {
-    rows.push([x.name, x.muscle_group, x.equipment, x.is_archived ? 'YES' : 'NO', x.id]);
+    rows.push([
+      safeText(x.name || ''),
+      safeText(x.muscle_group || ''),
+      safeText(x.equipment || ''),
+      x.is_archived ? 'YES' : 'NO',
+      safeText(x.id || '')
+    ]);
   });
 
   sheet.getRange(1, 1, rows.length, headers.length).setValues(rows);
@@ -653,14 +756,14 @@ function writeRoutinesSheet(ss, routines, routineExercises, exercises) {
 
     lines.forEach(function(l) {
       rows.push([
-        r.name,
-        r.day_hint || '',
+        safeText(r.name || ''),
+        safeText(r.day_hint || ''),
         l.order,
-        exMap[l.exercise_id] || l.exercise_id,
+        safeText(exMap[l.exercise_id] || l.exercise_id || ''),
         l.target_sets,
         l.target_reps,
-        r.description || '',
-        r.id
+        safeText(r.description || ''),
+        safeText(r.id || '')
       ]);
     });
   });
@@ -749,7 +852,7 @@ async function postToScript(webAppUrl: string, body: unknown): Promise<any> {
 export async function testGoogleSheetsConnection(
   webAppUrl: string,
   secretKey?: string
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; scriptVersion?: number }> {
   if (!isValidScriptUrl(webAppUrl)) {
     return {
       success: false,
@@ -762,10 +865,19 @@ export async function testGoogleSheetsConnection(
       action: 'test',
       secretKey: secretKey?.trim() || undefined
     });
+    const scriptVersion = res.scriptVersion != null ? Number(res.scriptVersion) : undefined;
     if (res.status === 'success') {
-      return { success: true, message: res.message || 'Connected successfully!' };
+      return {
+        success: true,
+        message: res.message || 'Connected successfully!',
+        ...(scriptVersion !== undefined ? { scriptVersion } : {})
+      };
     }
-    return { success: false, message: res.message || 'Error reported by Google Sheet' };
+    return {
+      success: false,
+      message: res.message || 'Error reported by Google Sheet',
+      ...(scriptVersion !== undefined ? { scriptVersion } : {})
+    };
   } catch (err: any) {
     return {
       success: false,
@@ -869,8 +981,10 @@ export async function syncToGoogleSheets(
     ' If you have not yet pasted the latest Apps Script from MyGym > Settings > Google Sheets Backup, do that (Deploy > Manage deployments > New version) and sync again.';
 
   // Decide the protocol up front.
+  // Chunked partitioned upload was introduced in v2. Both v2 and v3 support partitioned upload.
+  // Deployments < 2 fall back to legacy single-request sync.
   const scriptVersion = await detectScriptVersion(webAppUrl);
-  if (scriptVersion < APPS_SCRIPT_PROTOCOL_VERSION) {
+  if (scriptVersion < 2) {
     const legacy = await syncWholePayloadToScript(webAppUrl, parts, key);
     if (!legacy.success && /failed to fetch/i.test(legacy.message) && sets.length > 0) {
       return { success: false, message: legacy.message + UPDATE_HINT };

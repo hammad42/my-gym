@@ -102,7 +102,7 @@ export interface RestorableData {
   routine_exercises?: RoutineExercise[];
   sessions?: WorkoutSession[];
   sets?: SetLog[];
-  settings?: Settings;
+  settings?: Partial<Settings>;
 }
 
 export interface RestoreReport {

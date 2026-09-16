@@ -1,13 +1,15 @@
 import React, { useRef, useState } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings, MuscleGroup, Equipment } from '../types';
 import { db, clearAllLogs, resetDatabaseWithSampleData, restoreFromBackup, applyUnitChange as dbApplyUnitChange } from '../lib/db';
-import { buildBackup, isBackupPayload, downloadBackup, type BackupPayload } from '../lib/exportImport';
+import { buildBackup, downloadBackup, validateBackupJson, type ValidatedBackup } from '../lib/exportImport';
 import {
   testGoogleSheetsConnection,
+  detectScriptVersion,
   syncToGoogleSheets,
   fetchFromGoogleSheets,
   updateSheetsStatus,
-  GOOGLE_APPS_SCRIPT_TEMPLATE
+  GOOGLE_APPS_SCRIPT_TEMPLATE,
+  APPS_SCRIPT_PROTOCOL_VERSION
 } from '../lib/googleSheets';
 import { selectableExercises } from '../lib/sampleData';
 import { ExerciseIcon } from '../components/ExerciseIcon';
@@ -21,7 +23,9 @@ import {
   RotateCcw,
   Plus,
   AlertCircle,
+  AlertTriangle,
   Check,
+  CheckCircle2,
   Dumbbell,
   Cloud,
   RefreshCw,
@@ -91,7 +95,14 @@ export const SetupScreen: React.FC<Props> = ({
   const [showScript, setShowScript] = useState(false);
   // Unit switching rewrites stored weights, so it asks first and reports the count.
   const [pendingUnit, setPendingUnit] = useState<'kg' | 'lb' | null>(null);
-  const [pendingImport, setPendingImport] = useState<{ name: string; payload: BackupPayload; sessions: number; sets: number } | null>(null);
+  const [pendingImport, setPendingImport] = useState<{
+    name: string;
+    payload: ValidatedBackup;
+    sessions: number;
+    sets: number;
+    warnings: string[];
+    pendingSheetsUrl?: string;
+  } | null>(null);
   const [showArchivedExercises, setShowArchivedExercises] = useState(false);
   const [confirmDeleteExerciseId, setConfirmDeleteExerciseId] = useState<string | null>(null);
 
@@ -105,6 +116,7 @@ export const SetupScreen: React.FC<Props> = ({
 
   const handleSaveSheetsConfig = async () => {
     const trimmed = sheetsUrl.trim();
+    const urlChanged = trimmed !== (settings.google_sheets?.webAppUrl || '');
     await updateSheetsStatus(
       'general',
       {
@@ -112,7 +124,8 @@ export const SetupScreen: React.FC<Props> = ({
         webAppUrl: trimmed,
         autoSyncTwiceDaily: autoSync,
         lastSyncStatus: settings.google_sheets?.lastSyncStatus,
-        lastSyncError: settings.google_sheets?.lastSyncError
+        lastSyncError: settings.google_sheets?.lastSyncError,
+        ...(urlChanged ? { connectionVerifiedAt: undefined, scriptVersion: undefined } : {})
       },
       secretKey
     );
@@ -129,8 +142,34 @@ export const SetupScreen: React.FC<Props> = ({
       return;
     }
     setIsSyncingSheets(true);
+
     const res = await testGoogleSheetsConnection(sheetsUrl.trim(), secretKey.trim());
+    let detected = res.scriptVersion ?? 0;
+    if (detected === 0 && res.success) {
+      try {
+        detected = await detectScriptVersion(sheetsUrl.trim());
+      } catch {
+        detected = 0;
+      }
+    }
     setIsSyncingSheets(false);
+
+    if (res.success) {
+      await updateSheetsStatus(
+        'general',
+        {
+          connectionVerifiedAt: new Date().toISOString(),
+          ...(detected > 0 ? { scriptVersion: detected } : {}),
+          ...(settings.google_sheets?.lastSyncStatus === 'error'
+            ? { lastSyncStatus: 'idle' as const, lastSyncError: undefined }
+            : {})
+        },
+        secretKey
+      );
+    } else if (detected > 0) {
+      await updateSheetsStatus('general', { scriptVersion: detected }, secretKey);
+    }
+
     flash(res.message);
   };
 
@@ -183,14 +222,27 @@ export const SetupScreen: React.FC<Props> = ({
       flash(res.message || 'Could not load a backup from Google Sheets.');
       return;
     }
+
+    const validation = validateBackupJson({
+      app: 'mygym',
+      ...res.data
+    });
+    if (!validation.valid || !validation.data) {
+      setIsRestoringSheets(false);
+      setConfirmRestoreSheets(false);
+      flash(`Sheet backup invalid: ${validation.errors[0] || 'Unknown validation error'}`);
+      return;
+    }
+
     try {
       // Pass the live settings row so the Sheets credential is preserved even
       // if the stored row lags behind what is on screen.
-      const counts = await restoreFromBackup(res.data, settings);
+      const counts = await restoreFromBackup(validation.data, settings);
       setIsRestoringSheets(false);
       setConfirmRestoreSheets(false);
+      const warnNotice = validation.data.warnings.length > 0 ? ` (${validation.data.warnings.length} warning(s) handled)` : '';
       flash(
-        `Restored from sheet: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.`
+        `Restored from sheet: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.${warnNotice}`
       );
     } catch (err) {
       console.error('Restore from Sheets failed:', err);
@@ -212,16 +264,19 @@ export const SetupScreen: React.FC<Props> = ({
   const handleImportFile = async (file: File) => {
     try {
       const parsed = JSON.parse(await file.text());
-      if (!isBackupPayload(parsed)) {
-        flash('That file is not a MyGym backup.');
+      const validation = validateBackupJson(parsed);
+      if (!validation.valid || !validation.data) {
+        flash(validation.errors[0] || 'That file is not a valid MyGym backup.');
         return;
       }
       // Never replace live data without showing what is about to be lost.
       setPendingImport({
         name: file.name,
-        payload: parsed,
-        sessions: parsed.sessions.length,
-        sets: parsed.sets.length
+        payload: validation.data,
+        sessions: validation.data.sessions.length,
+        sets: validation.data.sets.length,
+        warnings: validation.data.warnings,
+        pendingSheetsUrl: validation.data.pendingSheetsUrl
       });
     } catch (err) {
       console.error('Import failed:', err);
@@ -233,10 +288,20 @@ export const SetupScreen: React.FC<Props> = ({
     if (!pendingImport) return;
     try {
       const counts = await restoreFromBackup(pendingImport.payload, settings);
+      const hadPendingUrl = Boolean(pendingImport.pendingSheetsUrl);
+      const warningsCount = pendingImport.warnings.length;
       setPendingImport(null);
-      flash(
-        `Backup restored: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.`
-      );
+      if (hadPendingUrl) {
+        flash(
+          `Restored: ${counts.sessions} sessions, ${counts.sets} sets. The backup's Google Sheets destination was NOT applied.`
+        );
+      } else {
+        flash(
+          `Backup restored: ${counts.sessions} sessions, ${counts.sets} sets, ${counts.exercises} exercises.${
+            warningsCount > 0 ? ` (${warningsCount} warning(s) handled)` : ''
+          }`
+        );
+      }
     } catch (err) {
       console.error('Import failed:', err);
       setPendingImport(null);
@@ -620,6 +685,38 @@ export const SetupScreen: React.FC<Props> = ({
           </button>
         </div>
 
+        {/* Script Version Status */}
+        {settings.google_sheets?.webAppUrl && (() => {
+          const detected = settings.google_sheets?.scriptVersion;
+          if (!detected) {
+            return (
+              <p className="text-[11px] text-slate-500">
+                Apps Script version unverified — tap Test to check connection and version.
+              </p>
+            );
+          }
+          if (detected >= APPS_SCRIPT_PROTOCOL_VERSION) {
+            return (
+              <p className="text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Apps Script v{detected} — up to date (staging sheet swap, formula protection, chunked backup active).
+                </span>
+              </p>
+            );
+          }
+          return (
+            <div className="text-[11px] text-amber-300 bg-amber-950/40 border border-amber-800/50 rounded-xl p-2.5 flex items-start gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span>
+                Apps Script v{detected} deployed, but v{APPS_SCRIPT_PROTOCOL_VERSION} is current. Open Setup
+                Instructions below, re-copy the script into Apps Script, then Deploy → Manage deployments → edit (pencil) →
+                Version: <strong>New version</strong> → Deploy (URL stays the same). Chunked backup still works, but staging sheet swap and formula protection are not active.
+              </span>
+            </div>
+          );
+        })()}
+
         {settings.google_sheets?.enabled && settings.google_sheets?.lastSyncTime && (
           <p
             className={`text-[11px] px-3 py-2 rounded-xl border ${
@@ -750,6 +847,24 @@ export const SetupScreen: React.FC<Props> = ({
               {pendingImport.sets} set(s). Restoring replaces the {sessions.length} session(s)
               on this device. Your Sheets credentials are kept.
             </p>
+            {pendingImport.pendingSheetsUrl && (
+              <div className="text-[11px] text-amber-300 bg-amber-900/40 border border-amber-700/50 rounded-lg p-2 flex items-start gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>
+                  The backup contains a Google Sheets destination which will <strong>NOT</strong> be applied. Your current sync settings stay untouched.
+                </span>
+              </div>
+            )}
+            {pendingImport.warnings && pendingImport.warnings.length > 0 && (
+              <div className="text-[11px] text-amber-300/90 bg-amber-900/30 border border-amber-800/40 rounded-lg p-2 space-y-1 max-h-24 overflow-y-auto">
+                {pendingImport.warnings.slice(0, 3).map((w, i) => (
+                  <p key={i}>• {w}</p>
+                ))}
+                {pendingImport.warnings.length > 3 && (
+                  <p>...and {pendingImport.warnings.length - 3} more</p>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 onClick={confirmImport}

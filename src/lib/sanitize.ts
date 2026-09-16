@@ -71,12 +71,10 @@ export function mergeRestoredSettings(
     id: current.id
   };
 
-  // Keep the device's Sheets secret. An incoming secret key is never trusted —
-  // this device's own value (or none) always wins. When the incoming settings
-  // carry no sync config at all, keep the local one rather than dropping it.
-  merged.google_sheets = incoming?.google_sheets
-    ? { ...incoming.google_sheets, secretKey: current.google_sheets?.secretKey }
-    : current.google_sheets;
+  // Google Sheets sync destination and credentials NEVER travel with a backup.
+  // The local device's configuration is kept completely intact so a restored file
+  // cannot silently hijack the sync destination or smuggle in altered sync flags.
+  merged.google_sheets = current.google_sheets;
 
   // The unit travels with the data; the preferences travel with the device.
   merged.weight_unit = incoming?.weight_unit === 'lb' || incoming?.weight_unit === 'kg'

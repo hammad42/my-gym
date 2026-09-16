@@ -84,6 +84,9 @@ based on:
 - The secret is sent only as the request's top-level auth field. It is stripped
   from the copy of the settings stored in the sheet, from JSON exports, and from
   every other payload that leaves the device (see `src/lib/sanitize.ts`).
+- **Destination Hijack Protection**: Restoring from a backup (file or remote) never overwrites the device's Google Sheets destination automatically. Incoming URLs are surfaced as pending for manual confirmation.
+- **First-Upload Guard**: Scheduled auto-sync is blocked until an explicit connection test succeeds on this device, protecting existing spreadsheet history from being overwritten by a freshly installed device.
+- **Protocol v3 & Atomic Staging**: Multi-part sync uploads stream to an isolated staging sheet (`_MyGymBackupNew_<syncId>`). The final commit acquires `LockService` to atomically swap the staging sheet into place and rewrite readable logs, escaping formula injection characters (`=`, `+`, `-`, `@`, `\t`, `\r`) with `safeText`.
 
 
 Check a deployment from the command line without writing any data:
@@ -114,5 +117,4 @@ src/
 
 `npm run build` stamps a content hash into the service worker's cache name
 (`scripts/version-sw.mjs`), so every deploy reliably evicts old caches.
-Deploy configs for Cloudflare Pages (`public/_headers`, `public/_redirects`, `wrangler.toml`),
-Vercel (`vercel.json`), and Netlify (`netlify.toml`) are included.
+Deployment is authoritative via Cloudflare Workers Static Assets (`wrangler.toml` and `.github/workflows/deploy-cloudflare.yml`), with security headers served via `public/_headers`.

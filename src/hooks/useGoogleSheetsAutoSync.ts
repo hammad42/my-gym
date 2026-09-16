@@ -21,7 +21,7 @@ export function useGoogleSheetsAutoSync(
 
   useEffect(() => {
     const config = settings.google_sheets;
-    if (!config || !config.enabled || !config.webAppUrl || !config.autoSyncTwiceDaily) {
+    if (!config || !config.enabled || !config.webAppUrl || !config.autoSyncTwiceDaily || !config.connectionVerifiedAt) {
       return;
     }
     if (defer) return;
@@ -37,7 +37,7 @@ export function useGoogleSheetsAutoSync(
 
       const currentData = dataRef.current;
       const currentConfig = currentData.settings.google_sheets;
-      if (!currentConfig || !currentConfig.enabled || !currentConfig.webAppUrl) return;
+      if (!currentConfig || !currentConfig.enabled || !currentConfig.webAppUrl || !currentConfig.connectionVerifiedAt) return;
 
       // Check if 12 hours have passed since last sync
       if (!isBackupDue(currentConfig.lastSyncTime, 12)) {
@@ -101,6 +101,7 @@ export function useGoogleSheetsAutoSync(
     settings.google_sheets?.webAppUrl,
     settings.google_sheets?.autoSyncTwiceDaily,
     settings.google_sheets?.lastSyncTime,
+    settings.google_sheets?.connectionVerifiedAt,
     defer
   ]);
 }

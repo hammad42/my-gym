@@ -502,13 +502,30 @@ describe('auto-sync deferral while logging (BUG-09)', () => {
       enabled: true,
       webAppUrl: 'https://script.google.com/macros/s/abc/exec',
       secretKey: 'k',
-      autoSyncTwiceDaily: true
+      autoSyncTwiceDaily: true,
+      connectionVerifiedAt: '2026-09-01T00:00:00.000Z'
     }
   };
 
   it('does not touch the network at all while deferred', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     renderHook(() => useGoogleSheetsAutoSync([], [], [], [], [], sheetSettings, true));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('blocks first-upload sync when connectionVerifiedAt is missing', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const unverified: Settings = {
+      ...DEFAULT_SETTINGS,
+      google_sheets: {
+        enabled: true,
+        webAppUrl: 'https://script.google.com/macros/s/abc/exec',
+        secretKey: 'k',
+        autoSyncTwiceDaily: true
+      }
+    };
+    renderHook(() => useGoogleSheetsAutoSync([], [], [], [], [], unverified, false));
     await new Promise((r) => setTimeout(r, 50));
     expect(fetchSpy).not.toHaveBeenCalled();
   });

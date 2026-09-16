@@ -12,7 +12,8 @@ export type MuscleGroup =
   | 'forearms'
   | 'traps'
   | 'cardio'
-  | 'full_body';
+  | 'full_body'
+  | 'other';
 
 export type Equipment =
   | 'barbell'
@@ -117,6 +118,8 @@ export interface GoogleSheetsSyncConfig {
   lastSyncStatus?: 'success' | 'error' | 'syncing' | 'idle';
   lastSyncError?: string;
   lastRecordCount?: number;
+  connectionVerifiedAt?: string;
+  scriptVersion?: number;
 }
 
 export interface Settings {
