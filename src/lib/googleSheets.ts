@@ -21,8 +21,11 @@ import { db } from './db';
  * v3 introduces per-session staging sheets (_MyGymBackupNew_<syncId>), LockService
  * scoped strictly around the commit swap, and safeText formula injection escaping
  * for readable training logs.
+ *
+ * v4 fixes LockService non-blocking tryLock check (BUG-02), restores missing readBackup()
+ * helper for cloud restore (BUG-01), and adds scriptVersion to error catch blocks (BUG-03).
  */
-export const APPS_SCRIPT_PROTOCOL_VERSION = 3;
+export const APPS_SCRIPT_PROTOCOL_VERSION = 4;
 
 /**
  * Character budget for one uploaded part. The ceiling is the ~50 KB Apps Script
@@ -322,14 +325,14 @@ function doGet(e) {
     return readBackup();
 
   } catch (err) {
-    return jsonOut({ status: 'error', message: err.toString() });
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: err.toString() });
   }
 }
 
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return jsonOut({ status: 'error', message: 'No payload data received.' });
+      return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'No payload data received.' });
     }
 
     if (!isSecured()) return notSecuredResponse();
@@ -350,7 +353,7 @@ function doPost(e) {
 
     if (action === 'fetch') return readBackup();
 
-    // --- partitioned upload (protocol v2/v3) ---------------------------------
+    // --- partitioned upload (protocol v2/v3/v4) -----------------------------
     if (action === 'sync-start') return syncStart(payload);
     if (action === 'sync-part') return syncPart(payload);
     if (action === 'sync-commit') return syncCommit(payload);
@@ -358,10 +361,10 @@ function doPost(e) {
     // --- single-request upload (legacy, small payloads only) ---------------
     if (action === 'sync') return syncWhole(payload);
 
-    return jsonOut({ status: 'error', message: 'Unknown action: ' + action });
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Unknown action: ' + action });
 
   } catch (err) {
-    return jsonOut({ status: 'error', message: err.toString() });
+    return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: err.toString() });
   }
 }
 
@@ -469,7 +472,7 @@ function syncCommit(payload) {
 
   var lock = LockService.getScriptLock();
   try {
-    var hasLock = lock.waitLock(30000);
+    var hasLock = lock.tryLock(30000);
     if (!hasLock) {
       return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Could not acquire lock to finalize backup. Please retry.' });
     }
@@ -522,7 +525,7 @@ function syncWhole(payload) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var lock = LockService.getScriptLock();
   try {
-    var hasLock = lock.waitLock(30000);
+    var hasLock = lock.tryLock(30000);
     if (!hasLock) {
       return jsonOut({ status: 'error', scriptVersion: SCRIPT_VERSION, message: 'Could not acquire lock to finalize backup. Please retry.' });
     }
@@ -597,6 +600,18 @@ function readParts() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var backup = ss.getSheetByName(BACKUP_SHEET);
   return readPartsFromSheet(backup);
+}
+
+function readBackup() {
+  var data = readParts();
+  if (!data) {
+    return jsonOut({
+      status: 'error',
+      scriptVersion: SCRIPT_VERSION,
+      message: 'No backup found in this Google Sheet yet. Perform a Sync first.'
+    });
+  }
+  return jsonOut({ status: 'success', scriptVersion: SCRIPT_VERSION, data: data });
 }
 
 function sheetNamed(ss, name) {

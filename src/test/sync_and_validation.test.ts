@@ -302,9 +302,9 @@ describe('downloadBackup async delayed revocation & mobile share', () => {
   });
 });
 
-describe('Google Apps Script Template protocol v3 hardening', () => {
-  it('exports protocol version 3', () => {
-    expect(APPS_SCRIPT_PROTOCOL_VERSION).toBe(3);
+describe('Google Apps Script Template protocol v4 hardening', () => {
+  it('exports protocol version 4', () => {
+    expect(APPS_SCRIPT_PROTOCOL_VERSION).toBe(4);
   });
 
   it('template contains safeText formula injection escaping', () => {
@@ -317,6 +317,12 @@ describe('Google Apps Script Template protocol v3 hardening', () => {
     expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain("var stagingName = '_MyGymBackupNew_' + syncId;");
     expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain('LockService.getScriptLock()');
     expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain('staging.setName(BACKUP_SHEET)');
+  });
+
+  it('template uses tryLock rather than waitLock and defines readBackup', () => {
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain('lock.tryLock(30000)');
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).not.toContain('lock.waitLock(30000)');
+    expect(GOOGLE_APPS_SCRIPT_TEMPLATE).toContain('function readBackup()');
   });
 });
 
