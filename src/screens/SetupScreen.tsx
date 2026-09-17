@@ -8,9 +8,17 @@ import {
   syncToGoogleSheets,
   fetchFromGoogleSheets,
   updateSheetsStatus,
+  isSyncInProgress,
   GOOGLE_APPS_SCRIPT_TEMPLATE,
   APPS_SCRIPT_PROTOCOL_VERSION
 } from '../lib/googleSheets';
+import { APP_VERSION, BUILD_TIME } from '../lib/version';
+import {
+  isPinConfigured,
+  verifyPin,
+  validateNewPin,
+  createPinCredentials
+} from '../lib/security';
 import { selectableExercises } from '../lib/sampleData';
 import { ExerciseIcon } from '../components/ExerciseIcon';
 import {
@@ -32,7 +40,13 @@ import {
   Copy,
   ExternalLink,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  Shield,
+  Lock,
+  KeyRound,
+  Eye,
+  EyeOff,
+  X
 } from 'lucide-react';
 
 interface Props {
@@ -62,8 +76,26 @@ export const SetupScreen: React.FC<Props> = ({
   sets,
   settings
 }) => {
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [confirmReset, setConfirmReset] = useState(false);
+  // Security PIN states
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [pinAction, setPinAction] = useState<'set' | 'change' | 'remove'>('set');
+  const [currentPinInput, setCurrentPinInput] = useState('');
+  const [newPinInput, setNewPinInput] = useState('');
+  const [confirmPinInput, setConfirmPinInput] = useState('');
+  const [pinModalError, setPinModalError] = useState<string | null>(null);
+
+  // Protected Clear Logs states
+  const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
+  const [clearPinInput, setClearPinInput] = useState('');
+  const [clearPinError, setClearPinError] = useState<string | null>(null);
+  const [showClearPinValue, setShowClearPinValue] = useState(false);
+
+  // Protected Reset Demo Data states
+  const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
+  const [resetPinInput, setResetPinInput] = useState('');
+  const [resetPinError, setResetPinError] = useState<string | null>(null);
+  const [showResetPinValue, setShowResetPinValue] = useState(false);
+
   const [message, setMessage] = useState<string | null>(null);
   const [showAddExercise, setShowAddExercise] = useState(false);
   const [newName, setNewName] = useState('');
@@ -174,6 +206,7 @@ export const SetupScreen: React.FC<Props> = ({
   };
 
   const handleSyncNow = async () => {
+    if (isSyncingSheets || isSyncInProgress()) return;
     const config = settings.google_sheets;
     if (!config?.webAppUrl) {
       flash('Save your Google Sheets settings first.');
@@ -184,24 +217,119 @@ export const SetupScreen: React.FC<Props> = ({
       return;
     }
     setIsSyncingSheets(true);
-    const res = await syncToGoogleSheets(
-      config.webAppUrl,
-      exercises,
-      routines,
-      routineExercises,
-      sessions,
-      sets,
-      settings,
-      config.secretKey
-    );
-    await updateSheetsStatus('general', {
-      lastSyncTime: res.success ? res.timestamp || new Date().toISOString() : settings.google_sheets?.lastSyncTime,
-      lastSyncStatus: res.success ? 'success' : 'error',
-      lastSyncError: res.success ? undefined : res.message,
-      lastRecordCount: res.success ? sessions.length : settings.google_sheets?.lastRecordCount
-    });
-    setIsSyncingSheets(false);
-    flash(res.message);
+    try {
+      const res = await syncToGoogleSheets(
+        config.webAppUrl,
+        exercises,
+        routines,
+        routineExercises,
+        sessions,
+        sets,
+        settings,
+        config.secretKey
+      );
+      await updateSheetsStatus('general', {
+        lastSyncTime: res.success ? res.timestamp || new Date().toISOString() : settings.google_sheets?.lastSyncTime,
+        lastSyncStatus: res.success ? 'success' : 'error',
+        lastSyncError: res.success ? undefined : res.message,
+        lastRecordCount: res.success ? sessions.length : settings.google_sheets?.lastRecordCount
+      });
+      flash(res.message);
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
+
+  const handleClearData = async () => {
+    if (!isPinConfigured(settings)) {
+      setClearPinError('No Security PIN is set. Set one first to authorize this action.');
+      return;
+    }
+    try {
+      if (!(await verifyPin(clearPinInput.trim(), settings))) {
+        setClearPinError('Incorrect Security PIN. Clear aborted.');
+        return;
+      }
+      await clearAllLogs();
+      setShowClearConfirmModal(false);
+      setClearPinInput('');
+      setClearPinError(null);
+      flash('All logged workouts deleted.');
+    } catch (err: any) {
+      console.error('Failed to clear logs:', err);
+      setClearPinError(err?.message || 'Could not clear workouts. Please try again.');
+    }
+  };
+
+  const handleResetSampleData = async () => {
+    if (isPinConfigured(settings)) {
+      try {
+        if (!(await verifyPin(resetPinInput.trim(), settings))) {
+          setResetPinError('Incorrect Security PIN. Reset aborted.');
+          return;
+        }
+      } catch (err: any) {
+        setResetPinError(err?.message || 'Could not verify the PIN. Reset aborted.');
+        return;
+      }
+    }
+    try {
+      await resetDatabaseWithSampleData();
+      setShowResetConfirmModal(false);
+      setResetPinInput('');
+      setResetPinError(null);
+      flash('Demo data reloaded.');
+    } catch (err: any) {
+      console.error('Failed to reset data:', err);
+      setResetPinError(err?.message || 'Could not reset the database. Please try again.');
+    }
+  };
+
+  const handleSavePinModal = async (e: React.FormEvent) => {
+    e.preventDefault();
+    try {
+      if (pinAction === 'remove') {
+        if (!(await verifyPin(currentPinInput.trim(), settings))) {
+          setPinModalError('Current PIN does not match.');
+          return;
+        }
+        const current = (await db.settings.get('general')) || settings;
+        const updated = { ...current };
+        delete updated.security_pin_hash;
+        delete updated.security_pin_salt;
+        await db.settings.put(updated);
+        setShowPinModal(false);
+        setCurrentPinInput('');
+        setPinModalError(null);
+        flash('Security PIN removed.');
+        return;
+      }
+
+      if (pinAction === 'change') {
+        if (!(await verifyPin(currentPinInput.trim(), settings))) {
+          setPinModalError('Current PIN does not match.');
+          return;
+        }
+      }
+
+      const valErr = validateNewPin(newPinInput, confirmPinInput);
+      if (valErr) {
+        setPinModalError(valErr);
+        return;
+      }
+
+      const credentials = await createPinCredentials(newPinInput.trim());
+      await updateSettings(credentials);
+      setShowPinModal(false);
+      setCurrentPinInput('');
+      setNewPinInput('');
+      setConfirmPinInput('');
+      setPinModalError(null);
+      flash(pinAction === 'change' ? 'Security PIN updated!' : 'Security PIN created!');
+    } catch (err: any) {
+      console.error('Failed to save security PIN:', err);
+      setPinModalError(err?.message || 'Could not save PIN. Please try again.');
+    }
   };
 
   const handleRestoreFromSheets = async () => {
@@ -674,11 +802,14 @@ export const SetupScreen: React.FC<Props> = ({
           </button>
           <button
             onClick={handleSyncNow}
-            disabled={isSyncingSheets}
-            className="flex items-center justify-center gap-1 bg-gradient-to-tr from-orange-600 to-amber-500 text-white rounded-xl py-2 text-[11px] font-bold transition disabled:opacity-60"
+            disabled={isSyncingSheets || isSyncInProgress()}
+            className="flex items-center justify-center gap-1 bg-gradient-to-tr from-orange-600 to-amber-500 text-white rounded-xl py-2 text-[11px] font-bold transition disabled:opacity-60 disabled:cursor-not-allowed"
           >
-            {isSyncingSheets ? (
-              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            {isSyncingSheets || isSyncInProgress() ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Syncing...</span>
+              </>
             ) : (
               'Sync now'
             )}
@@ -805,6 +936,83 @@ export const SetupScreen: React.FC<Props> = ({
         </div>
       </section>
 
+      {/* Security & PIN Protection */}
+      <section className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Shield className="w-4 h-4 text-orange-400" />
+            <h3 className="font-bold text-sm text-white">Security & PIN Protection</h3>
+          </div>
+          <div className="flex items-center gap-1.5">
+            {isPinConfigured(settings) ? (
+              <>
+                <button
+                  onClick={() => {
+                    setPinAction('change');
+                    setCurrentPinInput('');
+                    setNewPinInput('');
+                    setConfirmPinInput('');
+                    setPinModalError(null);
+                    setShowPinModal(true);
+                  }}
+                  className="text-xs text-orange-400 hover:text-orange-300 font-semibold px-2.5 py-1 rounded-lg bg-orange-950/40 border border-orange-800/50 hover:bg-orange-900/50 transition flex items-center gap-1"
+                >
+                  <KeyRound className="w-3 h-3" />
+                  <span>Change PIN</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setPinAction('remove');
+                    setCurrentPinInput('');
+                    setPinModalError(null);
+                    setShowPinModal(true);
+                  }}
+                  className="text-xs text-slate-400 hover:text-rose-300 font-semibold px-2 py-1 rounded-lg bg-slate-900 border border-slate-700 hover:border-rose-800/50 transition"
+                  title="Remove PIN"
+                >
+                  Remove
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => {
+                  setPinAction('set');
+                  setCurrentPinInput('');
+                  setNewPinInput('');
+                  setConfirmPinInput('');
+                  setPinModalError(null);
+                  setShowPinModal(true);
+                }}
+                className="text-xs text-orange-400 hover:text-orange-300 font-semibold px-2.5 py-1 rounded-lg bg-orange-950/40 border border-orange-800/50 hover:bg-orange-900/50 transition flex items-center gap-1"
+              >
+                <KeyRound className="w-3 h-3" />
+                <span>Set PIN</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="p-3 bg-slate-900/60 rounded-xl border border-slate-700/50 flex items-center justify-between text-xs">
+          <div>
+            <span className="font-semibold text-slate-200">Data Wipe Protection</span>
+            <p className="text-[11px] text-slate-400">
+              {isPinConfigured(settings)
+                ? 'Your Security PIN is active'
+                : 'No PIN set — Data wipe is protected until you set one'}
+            </p>
+          </div>
+          <span
+            className={`font-mono text-[10px] px-2.5 py-1 rounded-lg border font-bold tracking-wider ${
+              isPinConfigured(settings)
+                ? 'bg-slate-800 border-slate-700 text-slate-300'
+                : 'bg-amber-950/40 border-amber-800/50 text-amber-400'
+            }`}
+          >
+            {isPinConfigured(settings) ? 'LOCKED' : 'UNPROTECTED'}
+          </span>
+        </div>
+      </section>
+
       {/* Data management */}
       <section className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-4 space-y-3">
         <h3 className="text-sm font-bold text-white">Data</h3>
@@ -882,68 +1090,345 @@ export const SetupScreen: React.FC<Props> = ({
           </div>
         )}
 
-        {confirmClear ? (
-          <div className="flex items-center gap-2">
-            <button
-              onClick={async () => {
-                await clearAllLogs();
-                setConfirmClear(false);
-                flash('All logged workouts deleted.');
-              }}
-              className="flex-1 bg-rose-600 hover:bg-rose-500 text-white rounded-xl py-2 text-xs font-bold transition"
-            >
-              Delete all logs
-            </button>
-            <button
-              onClick={() => setConfirmClear(false)}
-              className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl py-2 text-xs font-bold transition"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setConfirmClear(true)}
-            className="w-full flex items-center justify-center gap-1.5 text-rose-400/80 hover:text-rose-400 border border-rose-900/50 hover:border-rose-700/50 rounded-xl py-2.5 text-xs font-bold transition"
-          >
-            <Trash2 className="w-4 h-4" /> Clear all logged workouts
-          </button>
-        )}
+        <button
+          onClick={() => {
+            setClearPinInput('');
+            setClearPinError(null);
+            setShowClearPinValue(false);
+            setShowClearConfirmModal(true);
+          }}
+          className="w-full flex items-center justify-center gap-1.5 text-rose-400/80 hover:text-rose-400 border border-rose-900/50 hover:border-rose-700/50 rounded-xl py-2.5 text-xs font-bold transition"
+        >
+          <Trash2 className="w-4 h-4" /> Clear all logged workouts
+        </button>
 
-        {confirmReset ? (
-          <div className="space-y-2">
-            <p className="flex items-start gap-1.5 text-[11px] text-amber-400">
-              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              This replaces everything (including routines and your library) with the demo data.
+        <button
+          onClick={() => {
+            setResetPinInput('');
+            setResetPinError(null);
+            setShowResetPinValue(false);
+            setShowResetConfirmModal(true);
+          }}
+          className="w-full flex items-center justify-center gap-1.5 text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-xl py-2.5 text-xs font-bold transition"
+        >
+          <RotateCcw className="w-4 h-4" /> Reset to demo data
+        </button>
+      </section>
+
+      {/* App Version & Info Footer */}
+      <section className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-4 text-center space-y-1.5 text-xs text-slate-400">
+        <div className="flex items-center justify-center gap-2 font-bold text-sm text-slate-200">
+          <Dumbbell className="w-4 h-4 text-orange-400" />
+          <span>MyGym PWA</span>
+          <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-orange-500/10 text-orange-400 border border-orange-500/20">
+            v{APP_VERSION}
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-500">
+          Build: {new Date(BUILD_TIME).toLocaleString(undefined, {
+            dateStyle: 'medium',
+            timeStyle: 'short'
+          })}
+        </p>
+        <p className="text-[10px] text-slate-500 pt-0.5">
+          100% Offline-First · Local IndexedDB · Zero Tracking
+        </p>
+      </section>
+
+      {/* Clear Logs Confirmation Modal */}
+      {showClearConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl space-y-3.5">
+            <div className="flex items-center gap-2 text-rose-400">
+              <Lock className="w-5 h-5" />
+              <h4 className="font-bold text-base text-white">Enter PIN to Clear Logs</h4>
+            </div>
+            <p className="text-xs text-slate-400">
+              This will permanently delete all logged workouts ({sessions.length} session(s) and {sets.length} set(s)).
+              Your exercise library and routines are preserved.
             </p>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={async () => {
-                  await resetDatabaseWithSampleData();
-                  setConfirmReset(false);
-                  flash('Demo data reloaded.');
+
+            {isPinConfigured(settings) ? (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleClearData();
                 }}
-                className="flex-1 bg-amber-600 hover:bg-amber-500 text-white rounded-xl py-2 text-xs font-bold transition"
+                className="space-y-2 pt-1"
               >
-                Reload demo data
-              </button>
+                <div className="relative">
+                  <input
+                    type={showClearPinValue ? 'text' : 'password'}
+                    value={clearPinInput}
+                    onChange={(e) => {
+                      setClearPinInput(e.target.value);
+                      if (clearPinError) setClearPinError(null);
+                    }}
+                    placeholder="Security PIN"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-rose-500 pr-10 font-mono tracking-widest"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowClearPinValue(!showClearPinValue)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                  >
+                    {showClearPinValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                {clearPinError && (
+                  <p className="text-[11px] text-rose-400 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{clearPinError}</span>
+                  </p>
+                )}
+
+                <div className="flex gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowClearConfirmModal(false);
+                      setClearPinInput('');
+                      setClearPinError(null);
+                    }}
+                    className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!clearPinInput.trim()}
+                    className="flex-1 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition disabled:opacity-50"
+                  >
+                    Verify & Clear
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="space-y-3 pt-1">
+                <p className="text-[11px] text-amber-400 flex items-start gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>
+                    No Security PIN is set. Clearing workout logs requires one, so an accidental tap can never wipe your history.
+                  </span>
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowClearConfirmModal(false)}
+                    className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowClearConfirmModal(false);
+                      setClearPinError(null);
+                      setPinAction('set');
+                      setCurrentPinInput('');
+                      setNewPinInput('');
+                      setConfirmPinInput('');
+                      setPinModalError(null);
+                      setShowPinModal(true);
+                    }}
+                    className="flex-1 py-2 rounded-xl bg-orange-600 hover:bg-orange-500 text-white text-xs font-semibold transition shadow-md shadow-orange-950/40"
+                  >
+                    Set PIN First
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Reset to Demo Data Modal */}
+      {showResetConfirmModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl space-y-3.5">
+            <div className="flex items-center gap-2 text-amber-400">
+              <AlertTriangle className="w-5 h-5" />
+              <h4 className="font-bold text-base text-white">Reset to Demo Data?</h4>
+            </div>
+            <p className="text-xs text-slate-400">
+              This replaces everything (including custom exercises, routines, and workout history) with the default demo data.
+              Your Google Sheets credentials are kept.
+            </p>
+
+            {isPinConfigured(settings) && (
+              <div className="space-y-1.5 pt-1">
+                <div className="relative">
+                  <input
+                    type={showResetPinValue ? 'text' : 'password'}
+                    value={resetPinInput}
+                    onChange={(e) => {
+                      setResetPinInput(e.target.value);
+                      if (resetPinError) setResetPinError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && resetPinInput.trim()) {
+                        handleResetSampleData();
+                      }
+                    }}
+                    placeholder="Enter Security PIN to authorize"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2.5 text-white text-sm focus:outline-none focus:border-amber-500 pr-10 font-mono tracking-widest"
+                    autoFocus
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPinValue(!showResetPinValue)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-200"
+                  >
+                    {showResetPinValue ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                {resetPinError && (
+                  <p className="text-[11px] text-rose-400 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                    <span>{resetPinError}</span>
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2">
               <button
-                onClick={() => setConfirmReset(false)}
-                className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-xl py-2 text-xs font-bold transition"
+                type="button"
+                onClick={() => {
+                  setShowResetConfirmModal(false);
+                  setResetPinInput('');
+                  setResetPinError(null);
+                }}
+                className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 transition"
               >
                 Cancel
               </button>
+              <button
+                type="button"
+                onClick={handleResetSampleData}
+                disabled={isPinConfigured(settings) && !resetPinInput.trim()}
+                className="flex-1 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold transition disabled:opacity-50"
+              >
+                Reload demo data
+              </button>
             </div>
           </div>
-        ) : (
-          <button
-            onClick={() => setConfirmReset(true)}
-            className="w-full flex items-center justify-center gap-1.5 text-slate-400 hover:text-slate-200 border border-slate-700 hover:border-slate-600 rounded-xl py-2.5 text-xs font-bold transition"
+        </div>
+      )}
+
+      {/* Security PIN Configuration Modal */}
+      {showPinModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4">
+          <form
+            onSubmit={handleSavePinModal}
+            className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-5 shadow-2xl space-y-3.5"
           >
-            <RotateCcw className="w-4 h-4" /> Reset to demo data
-          </button>
-        )}
-      </section>
+            <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-4 h-4 text-orange-400" />
+                <h4 className="font-bold text-sm text-white">
+                  {pinAction === 'set'
+                    ? 'Set Security PIN'
+                    : pinAction === 'change'
+                    ? 'Change Security PIN'
+                    : 'Remove Security PIN'}
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowPinModal(false)}
+                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              {pinAction === 'set'
+                ? 'Set a private PIN or password (min 4 characters) to protect your workouts from accidental deletion. It is stored only as a salted PBKDF2 hash on this device.'
+                : pinAction === 'change'
+                ? 'Enter your current PIN, then choose a new one.'
+                : 'Enter your current PIN to remove protection.'}
+            </p>
+
+            <div className="space-y-2.5 text-xs">
+              {(pinAction === 'change' || pinAction === 'remove') && (
+                <div>
+                  <label className="block text-slate-300 mb-1 font-medium">Current PIN</label>
+                  <input
+                    type="password"
+                    value={currentPinInput}
+                    onChange={(e) => setCurrentPinInput(e.target.value)}
+                    placeholder="Enter current PIN"
+                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
+                    required
+                    autoFocus
+                  />
+                </div>
+              )}
+
+              {pinAction !== 'remove' && (
+                <>
+                  <div>
+                    <label className="block text-slate-300 mb-1 font-medium">New PIN / Password</label>
+                    <input
+                      type="password"
+                      value={newPinInput}
+                      onChange={(e) => setNewPinInput(e.target.value)}
+                      placeholder="At least 4 digits or characters"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
+                      required
+                      autoFocus={pinAction === 'set'}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-300 mb-1 font-medium">Confirm New PIN</label>
+                    <input
+                      type="password"
+                      value={confirmPinInput}
+                      onChange={(e) => setConfirmPinInput(e.target.value)}
+                      placeholder="Re-enter new PIN"
+                      className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white font-mono"
+                      required
+                    />
+                  </div>
+                </>
+              )}
+
+              {pinModalError && (
+                <div className="p-2 rounded-lg bg-rose-950/50 border border-rose-800/60 text-rose-300 text-[11px] flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{pinModalError}</span>
+                </div>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowPinModal(false)}
+                className="flex-1 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-semibold hover:bg-slate-700 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                className={`flex-1 py-2 rounded-xl text-white text-xs font-semibold transition ${
+                  pinAction === 'remove'
+                    ? 'bg-rose-600 hover:bg-rose-500'
+                    : 'bg-orange-600 hover:bg-orange-500 shadow-md shadow-orange-950/40'
+                }`}
+              >
+                {pinAction === 'set' ? 'Save PIN' : pinAction === 'change' ? 'Update PIN' : 'Remove PIN'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </div>
   );
 };

@@ -26,6 +26,9 @@ export function sanitizeSettings(settings: Settings): Settings {
     clone.google_sheets = safeSheets;
   }
 
+  delete clone.security_pin_hash;
+  delete clone.security_pin_salt;
+
   return clone;
 }
 
@@ -35,7 +38,11 @@ export function sanitizeSettings(settings: Settings): Settings {
  */
 export function containsSecrets(settings: Partial<Settings> | undefined | null): boolean {
   if (!settings) return false;
-  return Boolean(settings.google_sheets?.secretKey);
+  return Boolean(
+    settings.google_sheets?.secretKey ||
+    settings.security_pin_hash ||
+    settings.security_pin_salt
+  );
 }
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
@@ -75,6 +82,10 @@ export function mergeRestoredSettings(
   // The local device's configuration is kept completely intact so a restored file
   // cannot silently hijack the sync destination or smuggle in altered sync flags.
   merged.google_sheets = current.google_sheets;
+
+  // The device's security PIN/password is preserved; incoming backups cannot overwrite it.
+  merged.security_pin_hash = current.security_pin_hash;
+  merged.security_pin_salt = current.security_pin_salt;
 
   // The unit travels with the data; the preferences travel with the device.
   merged.weight_unit = incoming?.weight_unit === 'lb' || incoming?.weight_unit === 'kg'

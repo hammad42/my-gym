@@ -960,6 +960,16 @@ async function syncWholePayloadToScript(
  * trial and error: sending partitioned actions to a v1 deployment would make it
  * write empty sheets and report success.
  */
+/**
+ * In-flight sync mutex to prevent overlapping sync requests from colliding on
+ * Google Apps Script's LockService.
+ */
+let syncInProgress = false;
+
+export function isSyncInProgress(): boolean {
+  return syncInProgress;
+}
+
 export async function syncToGoogleSheets(
   webAppUrl: string,
   exercises: Exercise[],
@@ -970,31 +980,36 @@ export async function syncToGoogleSheets(
   settings: Settings,
   secretKey?: string
 ): Promise<{ success: boolean; message: string; counts?: any; timestamp?: string }> {
+  if (syncInProgress) {
+    return { success: false, message: 'A sync is already in progress. Please wait a moment.' };
+  }
+
   if (!isValidScriptUrl(webAppUrl)) {
     return { success: false, message: 'Missing or invalid Google Sheets Web App URL.' };
   }
 
-  const key = secretKey?.trim() || undefined;
-  const parts = buildSyncParts(exercises, routines, routineExercises, sessions, sets, settings);
-
   const UPDATE_HINT =
     ' If you have not yet pasted the latest Apps Script from MyGym > Settings > Google Sheets Backup, do that (Deploy > Manage deployments > New version) and sync again.';
 
-  // Decide the protocol up front.
-  // Chunked partitioned upload was introduced in v2. Both v2 and v3 support partitioned upload.
-  // Deployments < 2 fall back to legacy single-request sync.
-  const scriptVersion = await detectScriptVersion(webAppUrl);
-  if (scriptVersion < 2) {
-    const legacy = await syncWholePayloadToScript(webAppUrl, parts, key);
-    if (!legacy.success && /failed to fetch/i.test(legacy.message) && sets.length > 0) {
-      return { success: false, message: legacy.message + UPDATE_HINT };
-    }
-    return legacy;
-  }
-
-  const syncId = `sync-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-
+  syncInProgress = true;
   try {
+    const key = secretKey?.trim() || undefined;
+    const parts = buildSyncParts(exercises, routines, routineExercises, sessions, sets, settings);
+
+    // Decide the protocol up front.
+    // Chunked partitioned upload was introduced in v2. Both v2 and v3 support partitioned upload.
+    // Deployments < 2 fall back to legacy single-request sync.
+    const scriptVersion = await detectScriptVersion(webAppUrl);
+    if (scriptVersion < 2) {
+      const legacy = await syncWholePayloadToScript(webAppUrl, parts, key);
+      if (!legacy.success && /failed to fetch/i.test(legacy.message) && sets.length > 0) {
+        return { success: false, message: legacy.message + UPDATE_HINT };
+      }
+      return legacy;
+    }
+
+    const syncId = `sync-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+
     const start = await postToScript(webAppUrl, { action: 'sync-start', secretKey: key, syncId, partCount: parts.length });
     if (start.status !== 'success') {
       return { success: false, message: start.message || 'Could not start the sync.' };
@@ -1035,6 +1050,8 @@ export async function syncToGoogleSheets(
       return { success: false, message: message + UPDATE_HINT };
     }
     return { success: false, message };
+  } finally {
+    syncInProgress = false;
   }
 }
 

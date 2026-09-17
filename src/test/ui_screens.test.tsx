@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
 import { db, initializeDatabase, resetDatabaseWithSampleData, saveWorkout } from '../lib/db';
+import { createPinCredentials } from '../lib/security';
 import { DEFAULT_SETTINGS, DEFAULT_EXERCISES, DEFAULT_ROUTINES, DEFAULT_ROUTINE_EXERCISES } from '../lib/sampleData';
 import { HomeScreen } from '../screens/HomeScreen';
 import { LogWorkoutScreen } from '../screens/LogWorkoutScreen';
@@ -652,10 +653,13 @@ describe('SetupScreen', () => {
 
   it('clears all logs behind a confirmation while keeping the library', async () => {
     await saveWorkout(session('keep-me', todayKey), []);
-    render(<SetupScreen {...props()} />);
+    const creds = await createPinCredentials('1234');
+    await db.settings.update('general', creds);
+    render(<SetupScreen {...props(settingsWith(creds))} />);
 
     fireEvent.click(screen.getByText(/Clear all logged workouts/));
-    fireEvent.click(screen.getByText('Delete all logs'));
+    fireEvent.change(screen.getByPlaceholderText('Security PIN'), { target: { value: '1234' } });
+    fireEvent.click(screen.getByText('Verify & Clear'));
 
     await waitFor(async () => {
       expect(await db.sessions.count()).toBe(0);

@@ -130,6 +130,12 @@ export interface Settings {
   /** Default rest between sets in seconds, used by the rest timer. */
   default_rest_seconds: number;
   google_sheets?: GoogleSheetsSyncConfig;
+  /**
+   * PBKDF2-SHA256 hash of the user's security PIN/password.
+   * Stripped from all exports and sync payloads (see `lib/sanitize.ts`).
+   */
+  security_pin_hash?: string;
+  security_pin_salt?: string;
 }
 
 /** A set resolved against its exercise, for rendering history and stats. */

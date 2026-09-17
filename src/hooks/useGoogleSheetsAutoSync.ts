@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Exercise, Routine, RoutineExercise, WorkoutSession, SetLog, Settings } from '../types';
-import { syncToGoogleSheets, isBackupDue, updateSheetsStatus } from '../lib/googleSheets';
+import { syncToGoogleSheets, isBackupDue, updateSheetsStatus, isSyncInProgress } from '../lib/googleSheets';
 
 export function useGoogleSheetsAutoSync(
   exercises: Exercise[],
@@ -27,8 +27,8 @@ export function useGoogleSheetsAutoSync(
     if (defer) return;
 
     const checkAndSync = async () => {
-      // Guard against overlapping sync calls
-      if (isSyncingRef.current) return;
+      // Guard against overlapping sync calls from auto-sync or manual sync
+      if (isSyncingRef.current || isSyncInProgress()) return;
 
       // Only sync if online
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
